@@ -5,47 +5,49 @@ import { getFirestore, collection, addDoc, deleteDoc, doc, onSnapshot, query } f
 import { 
   Camera, Calendar, MapPin, Plus, Trash2, History, ChevronRight, X, 
   Image as ImageIcon, Map as MapIcon, BarChart3, List, ChevronLeft, 
-  Search, Loader2, Navigation, Sparkles, Wand2, Cloud, CloudOff, AlertCircle, RefreshCw
+  Search, Loader2, Navigation, Sparkles, Wand2, Cloud, CloudOff, AlertCircle, RefreshCw, Bug
 } from 'lucide-react';
 
-// --- 配置與初始化 ---
-let rawConfig = null;
-let appId = 'baby-growth-map';
-
-// 嘗試從各種可能的位置抓取配置
-try {
-  if (typeof __firebase_config !== 'undefined') rawConfig = __firebase_config;
-  // 針對 Vercel 環境變數的常見讀取方式
-  if (!rawConfig && typeof process !== 'undefined' && process.env?.__firebase_config) rawConfig = process.env.__firebase_config;
+// --- 全域變數讀取與安全解析 ---
+const getGlobalConfig = () => {
+  let config = null;
+  let source = "none";
+  try {
+    // 1. 嘗試抓取 Canvas 環境注入的變數
+    if (typeof __firebase_config !== 'undefined') {
+      config = __firebase_config;
+      source = "window.__firebase_config";
+    } 
+    // 2. 嘗試抓取 Vercel 注入的環境變數 (Vite 模式)
+    else if (import.meta.env && import.meta.env.VITE_FIREBASE_CONFIG) {
+      config = import.meta.env.VITE_FIREBASE_CONFIG;
+      source = "import.meta.env.VITE_FIREBASE_CONFIG";
+    }
+    // 3. 嘗試抓取標準環境變數 (Vercel Node/Standard 模式)
+    else if (typeof process !== 'undefined' && process.env && process.env.__firebase_config) {
+      config = process.env.__firebase_config;
+      source = "process.env.__firebase_config";
+    }
+  } catch (e) {
+    console.warn("讀取配置時發生預期外的錯誤:", e);
+  }
   
-  if (typeof __app_id !== 'undefined') appId = __app_id;
-} catch (e) {
-  console.warn("環境變數讀取異常:", e);
-}
-
-// 解析 JSON
-let firebaseConfig = null;
-if (rawConfig) {
-  try {
-    firebaseConfig = typeof rawConfig === 'string' ? JSON.parse(rawConfig) : rawConfig;
-  } catch (e) {
-    console.error("Firebase Config JSON 解析失敗:", e);
+  // 解析 JSON
+  if (config && typeof config === 'string') {
+    try {
+      config = JSON.parse(config);
+    } catch (e) {
+      return { error: "JSON 解析失敗，請檢查 Vercel 設定中的 Value 是否包含完整的大括號且格式正確。", source };
+    }
   }
-}
+  
+  return { config, source };
+};
 
-// 初始化 Firebase
-let firebaseApp, auth, db;
-if (firebaseConfig) {
-  try {
-    firebaseApp = getApps().length > 0 ? getApp() : initializeApp(firebaseConfig);
-    auth = getAuth(firebaseApp);
-    db = getFirestore(firebaseApp);
-  } catch (e) {
-    console.error("Firebase 初始化失敗:", e);
-  }
-}
+const { config: firebaseConfig, source: configSource } = getGlobalConfig();
+const appId = typeof __app_id !== 'undefined' ? __app_id : 'baby-growth-map';
 
-// 台灣行政區劃資料
+// --- 台灣行政區劃資料 ---
 const TAIWAN_DATA = {
   "台北市": { center: [25.0330, 121.5654], districts: ["中正區", "大同區", "中山區", "松山區", "大安區", "萬華區", "信義區", "士林區", "北投區", "內湖區", "南港區", "文山區"] },
   "新北市": { center: [25.0125, 121.4657], districts: ["板橋區", "三重區", "中和區", "永和區", "新莊區", "新店區", "樹林區", "鶯歌區", "三峽區", "淡水區", "汐止區", "瑞芳區", "土城區", "蘆洲區", "五股區", "泰山區", "林口區", "深坑區", "石碇區", "坪林區", "三芝區", "石門區", "八里區", "平溪區", "雙溪區", "貢寮區", "金山區", "萬里區", "烏來區"] },
@@ -71,25 +73,24 @@ const TAIWAN_DATA = {
 
 const App = () => {
   // --- 錯誤攔截狀態 ---
-  const [runtimeError, setRuntimeError] = useState(null);
+  const [errorMsg, setErrorMsg] = useState(null);
+  const [debugMode, setDebugMode] = useState(false);
 
-  // --- 狀態管理 ---
+  // --- 核心實體 (Firebase) ---
+  const [firebaseInstance, setFirebaseInstance] = useState({ auth: null, db: null });
   const [user, setUser] = useState(null);
-  const [activeTab, setActiveTab] = useState('map'); 
   const [records, setRecords] = useState([]);
+
+  // --- UI 狀態 ---
+  const [activeTab, setActiveTab] = useState('map'); 
   const [isAdding, setIsAdding] = useState(false);
-  const [isSearching, setIsSearching] = useState(false);
   const [isAILoading, setIsAILoading] = useState(false);
   const [searchError, setSearchError] = useState('');
   const [selectedRecord, setSelectedRecord] = useState(null);
   const [formData, setFormData] = useState({
     date: new Date().toISOString().split('T')[0],
-    locationName: '',
-    county: '雲林縣',
-    district: '古坑鄉',
-    note: '',
-    photo: null,
-    coords: TAIWAN_DATA["雲林縣"].center
+    locationName: '', county: '雲林縣', district: '古坑鄉',
+    note: '', photo: null, coords: TAIWAN_DATA["雲林縣"].center
   });
 
   // --- Refs ---
@@ -97,132 +98,103 @@ const App = () => {
   const markersGroup = useRef(null);
   const heatGroup = useRef(null);
 
-  // --- 核心邏輯函式 ---
-  const safeText = (text) => {
-    if (text === null || text === undefined) return '';
-    if (typeof text === 'object') return JSON.stringify(text);
-    return String(text);
-  };
-
-  const handlePhoto = (e) => {
-    try {
-      const file = e.target.files[0];
-      if (file) {
-        const reader = new FileReader();
-        reader.onloadend = () => setFormData(prev => ({ ...prev, photo: reader.result }));
-        reader.readAsDataURL(file);
-      }
-    } catch (err) { console.error("照片讀取錯誤", err); }
-  };
-
-  const handleSelectRecord = (record) => {
-    setSelectedRecord(record);
-    setActiveTab('map');
-    if (mapInstance.current) {
-      setTimeout(() => {
-        mapInstance.current.invalidateSize();
-        mapInstance.current.flyTo(record.coords, 14);
-      }, 300);
-    }
-  };
-
-  const handleCountyChange = (newCounty) => {
-    const countyData = TAIWAN_DATA[newCounty];
-    if (!countyData) return;
-    setFormData(prev => ({
-      ...prev,
-      county: newCounty,
-      district: countyData.districts[0],
-      coords: countyData.center
-    }));
-    if (mapInstance.current) mapInstance.current.flyTo(countyData.center, 12);
-  };
-
-  // --- Firebase 效果 ---
+  // --- 初始化診斷 ---
   useEffect(() => {
-    if (!firebaseConfig || !auth) return;
-    const initAuth = async () => {
+    // 捕捉全域未處理錯誤
+    const handleError = (e) => setErrorMsg("運行時錯誤: " + e.message);
+    window.addEventListener('error', handleError);
+    
+    // 初始化 Firebase
+    if (firebaseConfig && typeof firebaseConfig === 'object') {
       try {
-        if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
-          await signInWithCustomToken(auth, __initial_auth_token);
-        } else {
-          await signInAnonymously(auth);
-        }
-      } catch (error) { 
-        console.error("Auth error:", error); 
-        setRuntimeError("Firebase 認證失敗: " + error.message);
+        const appInstance = getApps().length > 0 ? getApp() : initializeApp(firebaseConfig);
+        const authInstance = getAuth(appInstance);
+        const dbInstance = getFirestore(appInstance);
+        setFirebaseInstance({ auth: authInstance, db: dbInstance });
+        
+        // 監聽登入
+        const unsubscribeAuth = onAuthStateChanged(authInstance, (u) => {
+          if (u) setUser(u);
+          else signInAnonymously(authInstance).catch(e => setErrorMsg("匿名登入失敗: " + e.message));
+        });
+        
+        return () => {
+          window.removeEventListener('error', handleError);
+          unsubscribeAuth();
+        };
+      } catch (err) {
+        setErrorMsg("Firebase 初始化失敗，請檢查配置格式是否正確。");
+      }
+    } else if (firebaseConfig && firebaseConfig.error) {
+      setErrorMsg(firebaseConfig.error);
+    } else {
+      setErrorMsg("找不到 Firebase 配置。請至 Vercel 設定環境變數 __firebase_config");
+    }
+  }, []);
+
+  // --- 資料同步 ---
+  useEffect(() => {
+    if (!user || !firebaseInstance.db) return;
+    try {
+      const recordsCol = collection(firebaseInstance.db, 'artifacts', appId, 'users', user.uid, 'records');
+      const unsubscribe = onSnapshot(recordsCol, 
+        (snapshot) => {
+          const data = snapshot.docs.map(doc => ({ ...doc.data(), id: doc.id }));
+          data.sort((a, b) => new Date(b.date) - new Date(a.date));
+          setRecords(data);
+        },
+        (err) => console.error("Firestore error:", err)
+      );
+      return () => unsubscribe();
+    } catch (err) { console.error("Snapshot error:", err); }
+  }, [user, firebaseInstance.db]);
+
+  // --- 地圖處理 ---
+  useEffect(() => {
+    if (typeof window === 'undefined' || errorMsg) return;
+    
+    const initMap = () => {
+      const L = window.L;
+      if (!L) return;
+      if (!mapInstance.current) {
+        mapInstance.current = L.map('map-view', { zoomControl: false, tap: true, touchZoom: true, dragging: true }).setView([23.6, 121.0], 7);
+        L.tileLayer('https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png', { attribution: '©OSM' }).addTo(mapInstance.current);
+        markersGroup.current = L.layerGroup().addTo(mapInstance.current);
+        heatGroup.current = L.layerGroup().addTo(mapInstance.current);
+
+        mapInstance.current.on('click', (e) => {
+          const { lat, lng } = e.latlng;
+          setFormData(prev => {
+            let closestCounty = prev.county;
+            let minDistance = Infinity;
+            Object.entries(TAIWAN_DATA).forEach(([name, data]) => {
+              const d = Math.pow(lat - data.center[0], 2) + Math.pow(lng - data.center[1], 2);
+              if (d < minDistance) { minDistance = d; closestCounty = name; }
+            });
+            return { 
+              ...prev, coords: [lat, lng], county: closestCounty,
+              district: prev.county === closestCounty ? prev.district : TAIWAN_DATA[closestCounty].districts[0]
+            };
+          });
+          setIsAdding(true);
+        });
       }
     };
-    initAuth();
-    const unsubscribe = onAuthStateChanged(auth, setUser);
-    return () => unsubscribe();
-  }, []);
 
-  useEffect(() => {
-    if (!user || !db) return;
-    try {
-      const recordsCol = collection(db, 'artifacts', appId, 'users', user.uid, 'records');
-      const unsubscribe = onSnapshot(recordsCol, (snapshot) => {
-        const data = snapshot.docs.map(doc => ({ ...doc.data(), id: doc.id }));
-        data.sort((a, b) => new Date(b.date) - new Date(a.date));
-        setRecords(data);
-      }, (err) => {
-        console.error("Firestore error:", err);
-      });
-      return () => unsubscribe();
-    } catch (err) { setRuntimeError("資料庫連線異常: " + err.message); }
-  }, [user]);
-
-  // --- 地圖效果 ---
-  useEffect(() => {
-    if (typeof window !== 'undefined' && !mapInstance.current) {
-      const L_CSS_ID = 'leaflet-css-lib';
-      if (!document.getElementById(L_CSS_ID)) {
-        const link = document.createElement('link');
-        link.id = L_CSS_ID; link.rel = 'stylesheet';
-        link.href = 'https://unpkg.com/leaflet@1.9.4/dist/leaflet.css';
-        document.head.appendChild(link);
-      }
-      
+    if (!window.L) {
+      const link = document.createElement('link');
+      link.rel = 'stylesheet'; link.href = 'https://unpkg.com/leaflet@1.9.4/dist/leaflet.css';
+      document.head.appendChild(link);
       const script = document.createElement('script');
       script.src = 'https://unpkg.com/leaflet@1.9.4/dist/leaflet.js';
-      script.onload = () => {
-        const L = window.L;
-        if (!mapInstance.current) {
-          mapInstance.current = L.map('map-view', { zoomControl: false, tap: true, touchZoom: true, dragging: true }).setView([23.6, 121.0], 7);
-          L.tileLayer('https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png', { attribution: '©OpenStreetMap' }).addTo(mapInstance.current);
-          markersGroup.current = L.layerGroup().addTo(mapInstance.current);
-          heatGroup.current = L.layerGroup().addTo(mapInstance.current);
-
-          mapInstance.current.on('click', (e) => {
-            const { lat, lng } = e.latlng;
-            setFormData(prev => {
-              let closestCounty = prev.county;
-              let minDistance = Infinity;
-              Object.entries(TAIWAN_DATA).forEach(([name, data]) => {
-                const d = Math.pow(lat - data.center[0], 2) + Math.pow(lng - data.center[1], 2);
-                if (d < minDistance) { minDistance = d; closestCounty = name; }
-              });
-              return { 
-                ...prev, coords: [lat, lng], county: closestCounty,
-                district: prev.county === closestCounty ? prev.district : TAIWAN_DATA[closestCounty].districts[0]
-              };
-            });
-            setIsAdding(true);
-          });
-        }
-      };
+      script.onload = initMap;
       document.head.appendChild(script);
+    } else {
+      initMap();
     }
-  }, []);
+  }, [errorMsg]);
 
-  useEffect(() => {
-    if (activeTab === 'map' && mapInstance.current) {
-      const timer = setTimeout(() => { mapInstance.current.invalidateSize(); }, 300);
-      return () => clearTimeout(timer);
-    }
-  }, [activeTab]);
-
+  // 更新標記
   useEffect(() => {
     if (window.L && mapInstance.current && activeTab === 'map') {
       const L = window.L;
@@ -233,13 +205,11 @@ const App = () => {
       Object.keys(counts).forEach(county => {
         const center = TAIWAN_DATA[county]?.center;
         if (center) {
-          const count = counts[county];
-          const calculatedOpacity = Math.min((count / 25) * 0.5, 0.5);
+          const calculatedOpacity = Math.min((counts[county] / 25) * 0.5, 0.5);
           L.circle(center, { radius: 12000, fillColor: '#3b82f6', fillOpacity: Math.max(0.1, calculatedOpacity), color: 'transparent', interactive: false }).addTo(heatGroup.current);
         }
       });
       records.forEach(record => {
-        if (!record.coords) return;
         const markerIcon = L.divIcon({
           className: 'custom-icon',
           html: `<div class="w-10 h-10 rounded-full border-4 border-white shadow-xl overflow-hidden bg-blue-600 transform -translate-y-2">
@@ -249,56 +219,64 @@ const App = () => {
         });
         L.marker(record.coords, { icon: markerIcon }).addTo(markersGroup.current).on('click', (e) => {
           L.DomEvent.stopPropagation(e);
-          handleSelectRecord(record);
+          setSelectedRecord(record);
+          mapInstance.current.flyTo(record.coords, 14);
         });
       });
     }
   }, [records, activeTab]);
 
-  // --- 診斷畫面 ---
-  if (runtimeError) {
-    return (
-      <div className="h-screen flex flex-col items-center justify-center p-8 text-center bg-red-50 text-red-900">
-        <AlertCircle size={48} className="mb-4" />
-        <h1 className="text-xl font-bold mb-2">程式執行發生錯誤</h1>
-        <p className="text-sm opacity-80 mb-6">{runtimeError}</p>
-        <button onClick={() => window.location.reload()} className="px-6 py-2 bg-red-600 text-white rounded-full font-bold flex items-center gap-2">
-          <RefreshCw size={18} /> 重新整理
-        </button>
-      </div>
-    );
-  }
+  // --- 輔助函式 ---
+  const safeText = (text) => (typeof text === 'object' ? JSON.stringify(text) : String(text || ''));
 
-  if (!firebaseConfig) {
-    return (
-      <div className="h-screen flex flex-col items-center justify-center p-8 text-center bg-slate-50">
-        <AlertCircle size={48} className="text-orange-400 mb-4" />
-        <h1 className="text-xl font-bold text-slate-800 mb-2">Configuration Missing</h1>
-        <p className="text-sm text-slate-500 mb-6">尚未在環境變數中找到 <b>__firebase_config</b>。</p>
-        <div className="bg-white p-4 rounded-xl border text-left w-full max-w-sm text-xs text-slate-600 space-y-2">
-          <p className="font-bold text-slate-800">檢查清單：</p>
-          <p>1. Vercel 專案設定 &rarr; Environment Variables</p>
-          <p>2. Key: <code className="bg-slate-100 px-1">__firebase_config</code></p>
-          <p>3. Value: 是否包含完整的 <code className="bg-slate-100 px-1">{`{...}`}</code> 內容？</p>
-          <p>4. 填寫後是否有重新部署 (Redeploy)？</p>
-        </div>
-      </div>
-    );
-  }
+  const handlePhoto = (e) => {
+    const file = e.target.files[0];
+    if (file) {
+      const reader = new FileReader();
+      reader.onloadend = () => setFormData(prev => ({ ...prev, photo: reader.result }));
+      reader.readAsDataURL(file);
+    }
+  };
 
   const handleSave = async (e) => {
     e.preventDefault();
-    if (!user || !db) return;
+    if (!user || !firebaseInstance.db) return;
     try {
-      const recordsCol = collection(db, 'artifacts', appId, 'users', user.uid, 'records');
+      const recordsCol = collection(firebaseInstance.db, 'artifacts', appId, 'users', user.uid, 'records');
       await addDoc(recordsCol, formData);
       setIsAdding(false);
       setFormData({ date: new Date().toISOString().split('T')[0], locationName: '', county: '雲林縣', district: '古坑鄉', note: '', photo: null, coords: TAIWAN_DATA["雲林縣"].center });
     } catch (error) { setSearchError("儲存失敗: " + error.message); }
   };
 
+  // --- 渲染畫面 ---
+  if (errorMsg) {
+    return (
+      <div className="h-screen flex flex-col items-center justify-center p-8 bg-slate-50 text-center">
+        <AlertCircle size={64} className="text-red-500 mb-4" />
+        <h1 className="text-xl font-bold mb-2">啟動失敗</h1>
+        <p className="text-sm text-slate-500 mb-6 leading-relaxed">{errorMsg}</p>
+        <div className="flex gap-4">
+          <button onClick={() => window.location.reload()} className="px-6 py-2 bg-blue-600 text-white rounded-full font-bold flex items-center gap-2">
+            <RefreshCw size={18} /> 重新整理
+          </button>
+          <button onClick={() => setDebugMode(!debugMode)} className="px-6 py-2 bg-slate-200 text-slate-600 rounded-full font-bold flex items-center gap-2">
+            <Bug size={18} /> 診斷資訊
+          </button>
+        </div>
+        {debugMode && (
+          <div className="mt-8 p-4 bg-white border rounded-xl text-left w-full max-w-sm font-mono text-[10px] overflow-auto max-h-40">
+            <p>Source: {configSource}</p>
+            <p>AppID: {appId}</p>
+            <p>Config Detect: {firebaseConfig ? "Detected" : "Missing"}</p>
+          </div>
+        )}
+      </div>
+    );
+  }
+
   return (
-    <div className="flex flex-col h-screen bg-slate-50 text-slate-800 select-none overflow-hidden">
+    <div className="flex flex-col h-screen bg-slate-50 text-slate-800 select-none overflow-hidden font-sans">
       <header className="bg-white px-4 py-3 flex justify-between items-center shadow-sm z-10 shrink-0">
         <h1 className="text-lg font-black text-blue-600 flex items-center gap-2">
           <MapIcon size={20} /> 成長地圖
@@ -310,7 +288,7 @@ const App = () => {
             </div>
           ) : (
             <div className="flex items-center gap-1 text-[10px] font-bold text-slate-400 bg-slate-100 px-2 py-1 rounded-full uppercase">
-              <CloudOff size={12} /> 連線中...
+              <CloudOff size={12} /> 同步中
             </div>
           )}
           <div className="text-[10px] font-bold text-slate-400 bg-slate-100 px-2 py-1 rounded-full">{records.length} 則</div>
@@ -323,15 +301,15 @@ const App = () => {
         {activeTab === 'timeline' && (
           <div className="absolute inset-0 bg-slate-50 z-20 overflow-y-auto pb-24 animate-in slide-in-from-right duration-200">
             <div className="p-4 space-y-4">
-              <h2 className="text-xl font-black mb-4 tracking-tighter">回憶時光軸</h2>
+              <h2 className="text-xl font-black mb-4">回憶時光軸</h2>
               {records.map(r => (
-                <div key={r.id} className="bg-white rounded-2xl overflow-hidden shadow-sm border border-slate-100 flex p-3 gap-3 active:bg-slate-50 transition-colors" onClick={() => handleSelectRecord(r)}>
+                <div key={r.id} className="bg-white rounded-2xl overflow-hidden shadow-sm border border-slate-100 flex p-3 gap-3 active:bg-slate-50 transition-colors" onClick={() => setSelectedRecord(r)}>
                   <div className="w-20 h-20 bg-slate-100 rounded-xl overflow-hidden shrink-0">
                     {r.photo ? <img src={r.photo} className="w-full h-full object-cover" /> : <div className="w-full h-full flex items-center justify-center text-slate-300"><ImageIcon size={24} /></div>}
                   </div>
                   <div className="flex-1 min-w-0 flex flex-col justify-center">
                     <h3 className="font-bold text-slate-800 truncate">{safeText(r.locationName)}</h3>
-                    <p className="text-xs text-slate-400 mt-1 flex items-center gap-1 tracking-tighter"><Calendar size={12} /> {safeText(r.date)}</p>
+                    <p className="text-xs text-slate-400 mt-1 flex items-center gap-1"><Calendar size={12} /> {safeText(r.date)}</p>
                     <div className="mt-1 text-[10px] text-blue-500 font-bold uppercase">{safeText(r.county)} · {safeText(r.district)}</div>
                   </div>
                   <ChevronRight size={16} className="self-center text-slate-300" />
@@ -345,7 +323,7 @@ const App = () => {
         {activeTab === 'stats' && (
           <div className="absolute inset-0 bg-slate-50 z-20 overflow-y-auto pb-24 animate-in slide-in-from-right duration-200">
             <div className="p-4">
-              <h2 className="text-xl font-black mb-6 tracking-tighter">縣市冒險排行</h2>
+              <h2 className="text-xl font-black mb-6">縣市冒險排行</h2>
               {Object.entries(records.reduce((acc, r) => ({ ...acc, [r.county]: (acc[r.county] || 0) + 1 }), {}))
                 .sort((a, b) => b[1] - a[1])
                 .map(([county, count]) => (
@@ -371,7 +349,7 @@ const App = () => {
               <div className="w-12 h-1.5 bg-slate-200 rounded-full mx-auto mb-6" onClick={() => setSelectedRecord(null)}></div>
               <div className="flex justify-between items-start mb-4">
                 <div>
-                  <h3 className="text-2xl font-black text-slate-800 tracking-tighter">{safeText(selectedRecord.locationName)}</h3>
+                  <h3 className="text-2xl font-black text-slate-800">{safeText(selectedRecord.locationName)}</h3>
                   <p className="text-sm text-slate-400 font-bold mt-1 tracking-tighter">{safeText(selectedRecord.date)} · {safeText(selectedRecord.county)}{safeText(selectedRecord.district)}</p>
                 </div>
                 <button onClick={() => setSelectedRecord(null)} className="p-2 bg-slate-100 rounded-full text-slate-400"><X size={20} /></button>
@@ -381,7 +359,11 @@ const App = () => {
                 {safeText(selectedRecord.note || "留下了一段美好的足跡。")}
               </div>
               <button 
-                onClick={() => { if(window.confirm("確定要刪除這段記憶嗎？")) deleteRecord(selectedRecord.id); }} 
+                onClick={() => { if(window.confirm("確定要刪除這段記憶嗎？")) {
+                  const recordRef = doc(firebaseInstance.db, 'artifacts', appId, 'users', user.uid, 'records', selectedRecord.id);
+                  deleteDoc(recordRef);
+                  setSelectedRecord(null);
+                }}} 
                 className="w-full py-3 text-red-500 font-bold flex items-center justify-center gap-2 text-sm bg-red-50 rounded-2xl active:scale-95 transition-transform"
               >
                 <Trash2 size={16} /> 刪除這段記憶
@@ -424,7 +406,6 @@ const App = () => {
               <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-1">地點名稱</label>
               <div className="flex gap-2">
                 <input type="text" required placeholder="如：劍湖山世界" value={formData.locationName} onChange={e => setFormData({...formData, locationName: e.target.value})} className="flex-1 bg-slate-50 border-none rounded-xl px-4 py-3 text-base outline-none focus:ring-2 focus:ring-blue-500" />
-                <button type="button" onClick={() => {/* 這裡可以放搜尋邏輯 */}} className="bg-slate-100 text-slate-600 px-3 rounded-xl flex items-center justify-center"><Search size={20} /></button>
               </div>
               {searchError && <p className="text-[10px] text-orange-600 mt-2 ml-1 font-bold">{searchError}</p>}
             </div>
@@ -438,9 +419,7 @@ const App = () => {
             </div>
 
             <div>
-              <div className="flex justify-between items-end mb-1">
-                <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-1">成長筆記</label>
-              </div>
+              <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-1">成長筆記</label>
               <textarea rows="4" value={formData.note} onChange={e => setFormData({...formData, note: e.target.value})} className="w-full bg-slate-50 border-none rounded-xl px-4 py-3 text-base outline-none resize-none" placeholder="隨手記錄..." />
             </div>
             
