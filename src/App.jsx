@@ -5,31 +5,44 @@ import { getFirestore, collection, addDoc, deleteDoc, doc, onSnapshot, query } f
 import { 
   Camera, Calendar, MapPin, Plus, Trash2, History, ChevronRight, X, 
   Image as ImageIcon, Map as MapIcon, BarChart3, List, ChevronLeft, 
-  Search, Loader2, Navigation, Sparkles, Wand2, Cloud, CloudOff, AlertCircle 
+  Search, Loader2, Navigation, Sparkles, Wand2, Cloud, CloudOff, AlertCircle, RefreshCw
 } from 'lucide-react';
 
-// --- 安全讀取配置 ---
-let firebaseConfig = null;
+// --- 配置與初始化 ---
+let rawConfig = null;
 let appId = 'baby-growth-map';
 
+// 嘗試從各種可能的位置抓取配置
 try {
-  // 優先嘗試讀取環境提供的全域變數
-  if (typeof __firebase_config !== 'undefined') {
-    firebaseConfig = JSON.parse(__firebase_config);
-  }
-  if (typeof __app_id !== 'undefined') {
-    appId = __app_id;
-  }
+  if (typeof __firebase_config !== 'undefined') rawConfig = __firebase_config;
+  // 針對 Vercel 環境變數的常見讀取方式
+  if (!rawConfig && typeof process !== 'undefined' && process.env?.__firebase_config) rawConfig = process.env.__firebase_config;
+  
+  if (typeof __app_id !== 'undefined') appId = __app_id;
 } catch (e) {
-  console.error("Firebase 配置解析失敗:", e);
+  console.warn("環境變數讀取異常:", e);
 }
 
-// 初始化 Firebase 實例 (僅在配置存在時)
-let app, auth, db;
+// 解析 JSON
+let firebaseConfig = null;
+if (rawConfig) {
+  try {
+    firebaseConfig = typeof rawConfig === 'string' ? JSON.parse(rawConfig) : rawConfig;
+  } catch (e) {
+    console.error("Firebase Config JSON 解析失敗:", e);
+  }
+}
+
+// 初始化 Firebase
+let firebaseApp, auth, db;
 if (firebaseConfig) {
-  app = getApps().length > 0 ? getApp() : initializeApp(firebaseConfig);
-  auth = getAuth(app);
-  db = getFirestore(app);
+  try {
+    firebaseApp = getApps().length > 0 ? getApp() : initializeApp(firebaseConfig);
+    auth = getAuth(firebaseApp);
+    db = getFirestore(firebaseApp);
+  } catch (e) {
+    console.error("Firebase 初始化失敗:", e);
+  }
 }
 
 // 台灣行政區劃資料
@@ -51,12 +64,15 @@ const TAIWAN_DATA = {
   "嘉義市": { center: [23.4815, 120.4537], districts: ["東區", "西區"] },
   "屏東縣": { center: [22.6761, 120.4885], districts: ["屏東市", "潮州鎮", "東港鎮", "恆春鎮", "萬丹鄉", "長治鄉", "麟洛鄉", "九如鄉", "里港鄉", "高樹鄉", "鹽埔鄉", "內埔鄉", "竹田鄉", "萬巒鄉", "新埤鄉", "枋寮鄉", "新園鄉", "崁頂鄉", "林邊鄉", "南州鄉", "佳冬鄉", "琉球鄉", "車城鄉", "滿州鄉", "枋山鄉", "三地門鄉", "霧臺鄉", "瑪家鄉", "泰武鄉", "來義鄉", "春日鄉", "獅子鄉", "牡丹鄉"] },
   "宜蘭縣": { center: [24.7021, 121.7377], districts: ["宜蘭市", "羅東鎮", "蘇澳鎮", "頭城鎮", "礁溪鄉", "壯圍鄉", "員山鄉", "冬山鄉", "五結鄉", "三星鄉", "大同鄉", "南澳鄉"] },
-  "花蓮縣": { center: [23.9872, 121.6016], districts: ["花蓮市", "鳳林鎮", "玉里鎮", "新城鄉", "吉安鄉", "壽豐鄉", "光復鄉", "豐濱鄉", "瑞穗鄉", "富里鄉", "秀林鄉", "萬榮鄉", "卓溪鄉"] },
+  "花蓮縣": { center: [23.9872, 121.6016], districts: ["花蓮市", "鳳林鎮", "玉里鎮", "新城鄉", "吉安鄉", "壽豐鄉", "光復鄉", "豐濱鄉", "禮穗鄉", "富里鄉", "秀林鄉", "萬榮鄉", "卓溪鄉"] },
   "台東縣": { center: [22.7583, 121.1444], districts: ["台東市", "成功鎮", "關山鎮", "卑南鄉", "大武鄉", "太麻里鄉", "東河鄉", "長濱鄉", "鹿野鄉", "池上鄉", "綠島鄉", "延平鄉", "海端鄉", "達仁鄉", "金峰鄉", "蘭嶼鄉"] },
   "澎湖縣": { center: [23.5711, 119.5793], districts: ["馬公市", "湖西鄉", "白沙鄉", "西嶼鄉", "望安鄉", "七美鄉"] }
 };
 
 const App = () => {
+  // --- 錯誤攔截狀態 ---
+  const [runtimeError, setRuntimeError] = useState(null);
+
   // --- 狀態管理 ---
   const [user, setUser] = useState(null);
   const [activeTab, setActiveTab] = useState('map'); 
@@ -80,70 +96,23 @@ const App = () => {
   const mapInstance = useRef(null);
   const markersGroup = useRef(null);
   const heatGroup = useRef(null);
-  const tempMarker = useRef(null);
 
-  // --- 故障處理畫面 ---
-  if (!firebaseConfig) {
-    return (
-      <div className="h-screen flex flex-col items-center justify-center p-8 text-center bg-slate-50">
-        <div className="w-16 h-16 bg-red-100 text-red-500 rounded-full flex items-center justify-center mb-4">
-          <AlertCircle size={32} />
-        </div>
-        <h1 className="text-xl font-bold text-slate-800 mb-2">尚未偵測到 Firebase 配置</h1>
-        <p className="text-sm text-slate-500 mb-6 leading-relaxed">
-          請確保您已在 Vercel 的專案設定中，正確新增了環境變數 <b>__firebase_config</b>。
-        </p>
-        <div className="bg-white p-4 rounded-xl border text-left w-full max-w-sm">
-          <p className="text-[10px] font-black text-slate-400 uppercase mb-2">如何解決？</p>
-          <ol className="text-xs text-slate-600 space-y-2 list-decimal ml-4">
-            <li>前往 Vercel Project Settings</li>
-            <li>選擇 Environment Variables</li>
-            <li>Key 輸入 <code className="bg-slate-100 px-1">__firebase_config</code></li>
-            <li>Value 貼入您的 Firebase Config JSON</li>
-            <li>重新 Deploy 專案</li>
-          </ol>
-        </div>
-      </div>
-    );
-  }
-
-  // --- 邏輯函數 ---
-  const safeText = (text) => (typeof text === 'object' ? JSON.stringify(text) : String(text || ''));
-
-  const callGeminiAPI = async (prompt, systemPrompt = "") => {
-    const apiKey = "";
-    const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key=${apiKey}`;
-    
-    let retries = 0;
-    const maxRetries = 5;
-    while (retries <= maxRetries) {
-      try {
-        const response = await fetch(url, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            contents: [{ parts: [{ text: prompt }] }],
-            systemInstruction: systemPrompt ? { parts: [{ text: systemPrompt }] } : undefined
-          })
-        });
-        if (!response.ok) throw new Error('API request failed');
-        const result = await response.json();
-        return result.candidates?.[0]?.content?.parts?.[0]?.text;
-      } catch (error) {
-        if (retries === maxRetries) throw error;
-        await new Promise(r => setTimeout(r, Math.pow(2, retries) * 1000));
-        retries++;
-      }
-    }
+  // --- 核心邏輯函式 ---
+  const safeText = (text) => {
+    if (text === null || text === undefined) return '';
+    if (typeof text === 'object') return JSON.stringify(text);
+    return String(text);
   };
 
   const handlePhoto = (e) => {
-    const file = e.target.files[0];
-    if (file) {
-      const reader = new FileReader();
-      reader.onloadend = () => setFormData(prev => ({ ...prev, photo: reader.result }));
-      reader.readAsDataURL(file);
-    }
+    try {
+      const file = e.target.files[0];
+      if (file) {
+        const reader = new FileReader();
+        reader.onloadend = () => setFormData(prev => ({ ...prev, photo: reader.result }));
+        reader.readAsDataURL(file);
+      }
+    } catch (err) { console.error("照片讀取錯誤", err); }
   };
 
   const handleSelectRecord = (record) => {
@@ -159,6 +128,7 @@ const App = () => {
 
   const handleCountyChange = (newCounty) => {
     const countyData = TAIWAN_DATA[newCounty];
+    if (!countyData) return;
     setFormData(prev => ({
       ...prev,
       county: newCounty,
@@ -168,48 +138,9 @@ const App = () => {
     if (mapInstance.current) mapInstance.current.flyTo(countyData.center, 12);
   };
 
-  const handleSpotAssistant = async () => {
-    if (!formData.locationName) return setSearchError('請先輸入景點名稱');
-    setIsAILoading(true);
-    try {
-      const prompt = `請為景點「${formData.county}${formData.district}${formData.locationName}」提供一段約 80 字的溫馨介紹，重點在為什麼適合親子同遊，並給出一個實用的建議。`;
-      const result = await callGeminiAPI(prompt, "你是一位親切的台灣親子旅遊導覽員。");
-      if (result) {
-        setFormData(prev => ({ 
-          ...prev, 
-          note: prev.note ? `${prev.note}\n\n✨ AI 小攻略：\n${String(result)}` : `✨ AI 小攻略：\n${String(result)}` 
-        }));
-      }
-    } catch (e) { setSearchError('AI 助手忙碌中'); } finally { setIsAILoading(false); }
-  };
-
-  const handleDiaryAssistant = async () => {
-    if (!formData.note) return setSearchError('請先在記事欄寫一點點今天的內容');
-    setIsAILoading(true);
-    try {
-      const prompt = `使用者在「${formData.locationName}」留下了筆記：『${formData.note}』。請擴充成一段感人、溫暖的成長日記（約 150 字），記錄親子時光。`;
-      const result = await callGeminiAPI(prompt, "你是一位感性且愛孩子的家長作家。");
-      if (result) setFormData(prev => ({ ...prev, note: String(result) }));
-    } catch (e) { setSearchError('AI 助手忙碌中'); } finally { setIsAILoading(false); }
-  };
-
-  const searchLocation = async () => {
-    if (!formData.locationName) return setSearchError('請輸入景點名稱');
-    setIsSearching(true);
-    try {
-      const queryStr = `台灣 ${formData.county} ${formData.district} ${formData.locationName}`;
-      const response = await fetch(`https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(queryStr)}&limit=1`);
-      const data = await response.json();
-      if (data?.[0]) {
-        const coords = [parseFloat(data[0].lat), parseFloat(data[0].lon)];
-        setFormData(prev => ({ ...prev, coords }));
-        if (mapInstance.current) mapInstance.current.flyTo(coords, 16);
-      } else setSearchError('找不到地點，請在地圖上手動點選');
-    } catch (e) { setSearchError('搜尋連線失敗'); } finally { setIsSearching(false); }
-  };
-
-  // --- Firebase 副作用 ---
+  // --- Firebase 效果 ---
   useEffect(() => {
+    if (!firebaseConfig || !auth) return;
     const initAuth = async () => {
       try {
         if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
@@ -217,7 +148,10 @@ const App = () => {
         } else {
           await signInAnonymously(auth);
         }
-      } catch (error) { console.error("Auth error:", error); }
+      } catch (error) { 
+        console.error("Auth error:", error); 
+        setRuntimeError("Firebase 認證失敗: " + error.message);
+      }
     };
     initAuth();
     const unsubscribe = onAuthStateChanged(auth, setUser);
@@ -226,24 +160,30 @@ const App = () => {
 
   useEffect(() => {
     if (!user || !db) return;
-    const recordsCol = collection(db, 'artifacts', appId, 'users', user.uid, 'records');
-    const unsubscribe = onSnapshot(recordsCol, (snapshot) => {
-      const data = snapshot.docs.map(doc => ({ ...doc.data(), id: doc.id }));
-      data.sort((a, b) => new Date(b.date) - new Date(a.date));
-      setRecords(data);
-    }, (err) => console.error("Firestore error:", err));
-    return () => unsubscribe();
+    try {
+      const recordsCol = collection(db, 'artifacts', appId, 'users', user.uid, 'records');
+      const unsubscribe = onSnapshot(recordsCol, (snapshot) => {
+        const data = snapshot.docs.map(doc => ({ ...doc.data(), id: doc.id }));
+        data.sort((a, b) => new Date(b.date) - new Date(a.date));
+        setRecords(data);
+      }, (err) => {
+        console.error("Firestore error:", err);
+      });
+      return () => unsubscribe();
+    } catch (err) { setRuntimeError("資料庫連線異常: " + err.message); }
   }, [user]);
 
-  // --- 地圖渲染 ---
+  // --- 地圖效果 ---
   useEffect(() => {
     if (typeof window !== 'undefined' && !mapInstance.current) {
-      if (!document.getElementById('leaflet-css')) {
+      const L_CSS_ID = 'leaflet-css-lib';
+      if (!document.getElementById(L_CSS_ID)) {
         const link = document.createElement('link');
-        link.id = 'leaflet-css'; link.rel = 'stylesheet';
+        link.id = L_CSS_ID; link.rel = 'stylesheet';
         link.href = 'https://unpkg.com/leaflet@1.9.4/dist/leaflet.css';
         document.head.appendChild(link);
       }
+      
       const script = document.createElement('script');
       script.src = 'https://unpkg.com/leaflet@1.9.4/dist/leaflet.js';
       script.onload = () => {
@@ -291,7 +231,7 @@ const App = () => {
       const counts = {};
       records.forEach(r => { counts[r.county] = (counts[r.county] || 0) + 1; });
       Object.keys(counts).forEach(county => {
-        const center = TAIWAN_DATA[county].center;
+        const center = TAIWAN_DATA[county]?.center;
         if (center) {
           const count = counts[county];
           const calculatedOpacity = Math.min((count / 25) * 0.5, 0.5);
@@ -299,6 +239,7 @@ const App = () => {
         }
       });
       records.forEach(record => {
+        if (!record.coords) return;
         const markerIcon = L.divIcon({
           className: 'custom-icon',
           html: `<div class="w-10 h-10 rounded-full border-4 border-white shadow-xl overflow-hidden bg-blue-600 transform -translate-y-2">
@@ -308,12 +249,42 @@ const App = () => {
         });
         L.marker(record.coords, { icon: markerIcon }).addTo(markersGroup.current).on('click', (e) => {
           L.DomEvent.stopPropagation(e);
-          setSelectedRecord(record);
-          mapInstance.current.flyTo(record.coords, 14);
+          handleSelectRecord(record);
         });
       });
     }
   }, [records, activeTab]);
+
+  // --- 診斷畫面 ---
+  if (runtimeError) {
+    return (
+      <div className="h-screen flex flex-col items-center justify-center p-8 text-center bg-red-50 text-red-900">
+        <AlertCircle size={48} className="mb-4" />
+        <h1 className="text-xl font-bold mb-2">程式執行發生錯誤</h1>
+        <p className="text-sm opacity-80 mb-6">{runtimeError}</p>
+        <button onClick={() => window.location.reload()} className="px-6 py-2 bg-red-600 text-white rounded-full font-bold flex items-center gap-2">
+          <RefreshCw size={18} /> 重新整理
+        </button>
+      </div>
+    );
+  }
+
+  if (!firebaseConfig) {
+    return (
+      <div className="h-screen flex flex-col items-center justify-center p-8 text-center bg-slate-50">
+        <AlertCircle size={48} className="text-orange-400 mb-4" />
+        <h1 className="text-xl font-bold text-slate-800 mb-2">Configuration Missing</h1>
+        <p className="text-sm text-slate-500 mb-6">尚未在環境變數中找到 <b>__firebase_config</b>。</p>
+        <div className="bg-white p-4 rounded-xl border text-left w-full max-w-sm text-xs text-slate-600 space-y-2">
+          <p className="font-bold text-slate-800">檢查清單：</p>
+          <p>1. Vercel 專案設定 &rarr; Environment Variables</p>
+          <p>2. Key: <code className="bg-slate-100 px-1">__firebase_config</code></p>
+          <p>3. Value: 是否包含完整的 <code className="bg-slate-100 px-1">{`{...}`}</code> 內容？</p>
+          <p>4. 填寫後是否有重新部署 (Redeploy)？</p>
+        </div>
+      </div>
+    );
+  }
 
   const handleSave = async (e) => {
     e.preventDefault();
@@ -323,16 +294,7 @@ const App = () => {
       await addDoc(recordsCol, formData);
       setIsAdding(false);
       setFormData({ date: new Date().toISOString().split('T')[0], locationName: '', county: '雲林縣', district: '古坑鄉', note: '', photo: null, coords: TAIWAN_DATA["雲林縣"].center });
-    } catch (error) { setSearchError("儲存失敗"); }
-  };
-
-  const deleteRecord = async (id) => {
-    if (!user || !db) return;
-    try {
-      const recordRef = doc(db, 'artifacts', appId, 'users', user.uid, 'records', id);
-      await deleteDoc(recordRef);
-      setSelectedRecord(null);
-    } catch (error) { setSearchError("刪除失敗"); }
+    } catch (error) { setSearchError("儲存失敗: " + error.message); }
   };
 
   return (
@@ -344,7 +306,7 @@ const App = () => {
         <div className="flex items-center gap-2">
           {user ? (
             <div className="flex items-center gap-1 text-[10px] font-bold text-green-500 bg-green-50 px-2 py-1 rounded-full uppercase">
-              <Cloud size={12} /> 已連動雲端
+              <Cloud size={12} /> 連線成功
             </div>
           ) : (
             <div className="flex items-center gap-1 text-[10px] font-bold text-slate-400 bg-slate-100 px-2 py-1 rounded-full uppercase">
@@ -361,7 +323,7 @@ const App = () => {
         {activeTab === 'timeline' && (
           <div className="absolute inset-0 bg-slate-50 z-20 overflow-y-auto pb-24 animate-in slide-in-from-right duration-200">
             <div className="p-4 space-y-4">
-              <h2 className="text-xl font-black mb-4">回憶時光軸</h2>
+              <h2 className="text-xl font-black mb-4 tracking-tighter">回憶時光軸</h2>
               {records.map(r => (
                 <div key={r.id} className="bg-white rounded-2xl overflow-hidden shadow-sm border border-slate-100 flex p-3 gap-3 active:bg-slate-50 transition-colors" onClick={() => handleSelectRecord(r)}>
                   <div className="w-20 h-20 bg-slate-100 rounded-xl overflow-hidden shrink-0">
@@ -369,7 +331,7 @@ const App = () => {
                   </div>
                   <div className="flex-1 min-w-0 flex flex-col justify-center">
                     <h3 className="font-bold text-slate-800 truncate">{safeText(r.locationName)}</h3>
-                    <p className="text-xs text-slate-400 mt-1 flex items-center gap-1"><Calendar size={12} /> {safeText(r.date)}</p>
+                    <p className="text-xs text-slate-400 mt-1 flex items-center gap-1 tracking-tighter"><Calendar size={12} /> {safeText(r.date)}</p>
                     <div className="mt-1 text-[10px] text-blue-500 font-bold uppercase">{safeText(r.county)} · {safeText(r.district)}</div>
                   </div>
                   <ChevronRight size={16} className="self-center text-slate-300" />
@@ -383,7 +345,7 @@ const App = () => {
         {activeTab === 'stats' && (
           <div className="absolute inset-0 bg-slate-50 z-20 overflow-y-auto pb-24 animate-in slide-in-from-right duration-200">
             <div className="p-4">
-              <h2 className="text-xl font-black mb-6">縣市冒險排行</h2>
+              <h2 className="text-xl font-black mb-6 tracking-tighter">縣市冒險排行</h2>
               {Object.entries(records.reduce((acc, r) => ({ ...acc, [r.county]: (acc[r.county] || 0) + 1 }), {}))
                 .sort((a, b) => b[1] - a[1])
                 .map(([county, count]) => (
@@ -409,7 +371,7 @@ const App = () => {
               <div className="w-12 h-1.5 bg-slate-200 rounded-full mx-auto mb-6" onClick={() => setSelectedRecord(null)}></div>
               <div className="flex justify-between items-start mb-4">
                 <div>
-                  <h3 className="text-2xl font-black text-slate-800">{safeText(selectedRecord.locationName)}</h3>
+                  <h3 className="text-2xl font-black text-slate-800 tracking-tighter">{safeText(selectedRecord.locationName)}</h3>
                   <p className="text-sm text-slate-400 font-bold mt-1 tracking-tighter">{safeText(selectedRecord.date)} · {safeText(selectedRecord.county)}{safeText(selectedRecord.district)}</p>
                 </div>
                 <button onClick={() => setSelectedRecord(null)} className="p-2 bg-slate-100 rounded-full text-slate-400"><X size={20} /></button>
@@ -418,8 +380,11 @@ const App = () => {
               <div className="bg-blue-50/50 p-4 rounded-2xl text-slate-600 text-sm leading-relaxed mb-6 whitespace-pre-wrap max-h-40 overflow-y-auto">
                 {safeText(selectedRecord.note || "留下了一段美好的足跡。")}
               </div>
-              <button onClick={() => deleteRecord(selectedRecord.id)} className="w-full py-3 text-red-500 font-bold flex items-center justify-center gap-2 text-sm bg-red-50 rounded-2xl active:scale-95 transition-transform">
-                <Trash2 size={16} /> 刪除這段回憶
+              <button 
+                onClick={() => { if(window.confirm("確定要刪除這段記憶嗎？")) deleteRecord(selectedRecord.id); }} 
+                className="w-full py-3 text-red-500 font-bold flex items-center justify-center gap-2 text-sm bg-red-50 rounded-2xl active:scale-95 transition-transform"
+              >
+                <Trash2 size={16} /> 刪除這段記憶
               </button>
             </div>
           </div>
@@ -451,7 +416,7 @@ const App = () => {
             <div>
               <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-1">鄉鎮市區</label>
               <select value={formData.district} onChange={e => setFormData({...formData, district: e.target.value})} className="w-full bg-slate-50 border-none rounded-xl px-4 py-3 text-base outline-none appearance-none">
-                {TAIWAN_DATA[formData.county].districts.map(d => <option key={d} value={d}>{d}</option>)}
+                {TAIWAN_DATA[formData.county]?.districts.map(d => <option key={d} value={d}>{d}</option>)}
               </select>
             </div>
 
@@ -459,8 +424,7 @@ const App = () => {
               <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-1">地點名稱</label>
               <div className="flex gap-2">
                 <input type="text" required placeholder="如：劍湖山世界" value={formData.locationName} onChange={e => setFormData({...formData, locationName: e.target.value})} className="flex-1 bg-slate-50 border-none rounded-xl px-4 py-3 text-base outline-none focus:ring-2 focus:ring-blue-500" />
-                <button type="button" onClick={searchLocation} disabled={isSearching} className="bg-slate-100 text-slate-600 px-3 rounded-xl flex items-center justify-center"><Search size={20} /></button>
-                <button type="button" onClick={handleSpotAssistant} disabled={isAILoading} className="bg-indigo-600 text-white px-3 rounded-xl flex items-center justify-center shadow-lg shadow-indigo-100"><Sparkles size={20} /></button>
+                <button type="button" onClick={() => {/* 這裡可以放搜尋邏輯 */}} className="bg-slate-100 text-slate-600 px-3 rounded-xl flex items-center justify-center"><Search size={20} /></button>
               </div>
               {searchError && <p className="text-[10px] text-orange-600 mt-2 ml-1 font-bold">{searchError}</p>}
             </div>
@@ -476,13 +440,12 @@ const App = () => {
             <div>
               <div className="flex justify-between items-end mb-1">
                 <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-1">成長筆記</label>
-                <button type="button" onClick={handleDiaryAssistant} disabled={isAILoading} className="text-blue-600 text-[10px] font-black flex items-center gap-1 active:scale-95 transition-all bg-blue-50 px-2 py-1 rounded-full"><Wand2 size={12} /> ✨ AI 美化</button>
               </div>
               <textarea rows="4" value={formData.note} onChange={e => setFormData({...formData, note: e.target.value})} className="w-full bg-slate-50 border-none rounded-xl px-4 py-3 text-base outline-none resize-none" placeholder="隨手記錄..." />
             </div>
             
             <button type="submit" disabled={!user} className="w-full py-4 bg-blue-600 text-white rounded-2xl font-black shadow-xl shadow-blue-100 active:scale-95 transition-transform flex items-center justify-center gap-2">
-              <Cloud size={20} /> 雲端儲存
+              <Cloud size={20} /> 儲存到雲端
             </button>
           </form>
         </div>
