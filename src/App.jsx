@@ -8,46 +8,50 @@ import {
   Search, Loader2, Navigation, Sparkles, Wand2, Cloud, CloudOff, AlertCircle, RefreshCw, Bug
 } from 'lucide-react';
 
-// --- 全域變數讀取與安全解析 ---
-const getGlobalConfig = () => {
-  let config = null;
-  let source = "none";
+// --- 配置與初始化診斷 ---
+const getTargetConfig = () => {
   try {
-    // 1. 嘗試抓取 Canvas 環境注入的變數
-    if (typeof __firebase_config !== 'undefined') {
-      config = __firebase_config;
-      source = "window.__firebase_config";
-    } 
-    // 2. 嘗試抓取 Vercel 注入的環境變數 (Vite 模式)
-    else if (import.meta.env && import.meta.env.VITE_FIREBASE_CONFIG) {
-      config = import.meta.env.VITE_FIREBASE_CONFIG;
-      source = "import.meta.env.VITE_FIREBASE_CONFIG";
-    }
-    // 3. 嘗試抓取標準環境變數 (Vercel Node/Standard 模式)
-    else if (typeof process !== 'undefined' && process.env && process.env.__firebase_config) {
-      config = process.env.__firebase_config;
-      source = "process.env.__firebase_config";
+    // 1. 優先嘗試 Canvas 預覽環境變數
+    if (typeof __firebase_config !== 'undefined') return __firebase_config;
+    
+    // 2. 嘗試 Vite/Vercel 環境變數 (必須以 VITE_ 開頭)
+    if (import.meta.env && import.meta.env.VITE_FIREBASE_CONFIG) {
+      return import.meta.env.VITE_FIREBASE_CONFIG;
     }
   } catch (e) {
-    console.warn("讀取配置時發生預期外的錯誤:", e);
+    console.error("讀取配置異常", e);
   }
-  
-  // 解析 JSON
-  if (config && typeof config === 'string') {
-    try {
-      config = JSON.parse(config);
-    } catch (e) {
-      return { error: "JSON 解析失敗，請檢查 Vercel 設定中的 Value 是否包含完整的大括號且格式正確。", source };
-    }
-  }
-  
-  return { config, source };
+  return null;
 };
 
-const { config: firebaseConfig, source: configSource } = getGlobalConfig();
-const appId = typeof __app_id !== 'undefined' ? __app_id : 'baby-growth-map';
+const rawConfig = getTargetConfig();
+let firebaseConfig = null;
+let configError = null;
 
-// --- 台灣行政區劃資料 ---
+if (rawConfig) {
+  try {
+    firebaseConfig = typeof rawConfig === 'string' ? JSON.parse(rawConfig) : rawConfig;
+  } catch (e) {
+    configError = "配置格式錯誤：請確保 Vercel 的 Value 內容只有大括號 {...}，不包含 const 或分號。";
+  }
+} else {
+  configError = "找不到配置：請確認 Vercel 設定中 Key 是否為 VITE_FIREBASE_CONFIG";
+}
+
+// 初始化 Firebase 實體
+let auth, db, appId = 'baby-growth-map';
+if (firebaseConfig) {
+  try {
+    const firebaseApp = getApps().length > 0 ? getApp() : initializeApp(firebaseConfig);
+    auth = getAuth(firebaseApp);
+    db = getFirestore(firebaseApp);
+    if (typeof __app_id !== 'undefined') appId = __app_id;
+  } catch (e) {
+    configError = "Firebase 連線失敗: " + e.message;
+  }
+}
+
+// 台灣行政區劃資料
 const TAIWAN_DATA = {
   "台北市": { center: [25.0330, 121.5654], districts: ["中正區", "大同區", "中山區", "松山區", "大安區", "萬華區", "信義區", "士林區", "北投區", "內湖區", "南港區", "文山區"] },
   "新北市": { center: [25.0125, 121.4657], districts: ["板橋區", "三重區", "中和區", "永和區", "新莊區", "新店區", "樹林區", "鶯歌區", "三峽區", "淡水區", "汐止區", "瑞芳區", "土城區", "蘆洲區", "五股區", "泰山區", "林口區", "深坑區", "石碇區", "坪林區", "三芝區", "石門區", "八里區", "平溪區", "雙溪區", "貢寮區", "金山區", "萬里區", "烏來區"] },
@@ -72,113 +76,81 @@ const TAIWAN_DATA = {
 };
 
 const App = () => {
-  // --- 錯誤攔截狀態 ---
-  const [errorMsg, setErrorMsg] = useState(null);
-  const [debugMode, setDebugMode] = useState(false);
-
-  // --- 核心實體 (Firebase) ---
-  const [firebaseInstance, setFirebaseInstance] = useState({ auth: null, db: null });
+  // --- 狀態管理 ---
   const [user, setUser] = useState(null);
   const [records, setRecords] = useState([]);
-
-  // --- UI 狀態 ---
-  const [activeTab, setActiveTab] = useState('map'); 
+  const [activeTab, setActiveTab] = useState('map');
   const [isAdding, setIsAdding] = useState(false);
-  const [isAILoading, setIsAILoading] = useState(false);
-  const [searchError, setSearchError] = useState('');
   const [selectedRecord, setSelectedRecord] = useState(null);
+  const [searchError, setSearchError] = useState('');
+  
   const [formData, setFormData] = useState({
     date: new Date().toISOString().split('T')[0],
     locationName: '', county: '雲林縣', district: '古坑鄉',
     note: '', photo: null, coords: TAIWAN_DATA["雲林縣"].center
   });
 
-  // --- Refs ---
   const mapInstance = useRef(null);
   const markersGroup = useRef(null);
   const heatGroup = useRef(null);
 
-  // --- 初始化診斷 ---
+  // --- 安全渲染函式 ---
+  const safeText = (val) => (typeof val === 'object' ? JSON.stringify(val) : String(val || ''));
+
+  // --- Firebase 邏輯 ---
   useEffect(() => {
-    // 捕捉全域未處理錯誤
-    const handleError = (e) => setErrorMsg("運行時錯誤: " + e.message);
-    window.addEventListener('error', handleError);
-    
-    // 初始化 Firebase
-    if (firebaseConfig && typeof firebaseConfig === 'object') {
+    if (!auth) return;
+    const initAuth = async () => {
       try {
-        const appInstance = getApps().length > 0 ? getApp() : initializeApp(firebaseConfig);
-        const authInstance = getAuth(appInstance);
-        const dbInstance = getFirestore(appInstance);
-        setFirebaseInstance({ auth: authInstance, db: dbInstance });
-        
-        // 監聽登入
-        const unsubscribeAuth = onAuthStateChanged(authInstance, (u) => {
-          if (u) setUser(u);
-          else signInAnonymously(authInstance).catch(e => setErrorMsg("匿名登入失敗: " + e.message));
-        });
-        
-        return () => {
-          window.removeEventListener('error', handleError);
-          unsubscribeAuth();
-        };
-      } catch (err) {
-        setErrorMsg("Firebase 初始化失敗，請檢查配置格式是否正確。");
-      }
-    } else if (firebaseConfig && firebaseConfig.error) {
-      setErrorMsg(firebaseConfig.error);
-    } else {
-      setErrorMsg("找不到 Firebase 配置。請至 Vercel 設定環境變數 __firebase_config");
-    }
+        if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
+          await signInWithCustomToken(auth, __initial_auth_token);
+        } else {
+          await signInAnonymously(auth);
+        }
+      } catch (err) { console.error("Auth Error", err); }
+    };
+    initAuth();
+    const unsubscribe = onAuthStateChanged(auth, setUser);
+    return () => unsubscribe();
   }, []);
 
-  // --- 資料同步 ---
   useEffect(() => {
-    if (!user || !firebaseInstance.db) return;
-    try {
-      const recordsCol = collection(firebaseInstance.db, 'artifacts', appId, 'users', user.uid, 'records');
-      const unsubscribe = onSnapshot(recordsCol, 
-        (snapshot) => {
-          const data = snapshot.docs.map(doc => ({ ...doc.data(), id: doc.id }));
-          data.sort((a, b) => new Date(b.date) - new Date(a.date));
-          setRecords(data);
-        },
-        (err) => console.error("Firestore error:", err)
-      );
-      return () => unsubscribe();
-    } catch (err) { console.error("Snapshot error:", err); }
-  }, [user, firebaseInstance.db]);
+    if (!user || !db) return;
+    const recordsCol = collection(db, 'artifacts', appId, 'users', user.uid, 'records');
+    const unsubscribe = onSnapshot(recordsCol, (snap) => {
+      const data = snap.docs.map(doc => ({ ...doc.data(), id: doc.id }));
+      data.sort((a, b) => new Date(b.date) - new Date(a.date));
+      setRecords(data);
+    });
+    return () => unsubscribe();
+  }, [user]);
 
-  // --- 地圖處理 ---
+  // --- 地圖邏輯 ---
   useEffect(() => {
-    if (typeof window === 'undefined' || errorMsg) return;
+    if (typeof window === 'undefined' || configError) return;
     
     const initMap = () => {
       const L = window.L;
-      if (!L) return;
-      if (!mapInstance.current) {
-        mapInstance.current = L.map('map-view', { zoomControl: false, tap: true, touchZoom: true, dragging: true }).setView([23.6, 121.0], 7);
-        L.tileLayer('https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png', { attribution: '©OSM' }).addTo(mapInstance.current);
-        markersGroup.current = L.layerGroup().addTo(mapInstance.current);
-        heatGroup.current = L.layerGroup().addTo(mapInstance.current);
+      if (!L || mapInstance.current) return;
+      
+      mapInstance.current = L.map('map-view', { zoomControl: false, tap: true }).setView([23.6, 121.0], 7);
+      L.tileLayer('https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png', { attribution: '©OSM' }).addTo(mapInstance.current);
+      markersGroup.current = L.layerGroup().addTo(mapInstance.current);
+      heatGroup.current = L.layerGroup().addTo(mapInstance.current);
 
-        mapInstance.current.on('click', (e) => {
-          const { lat, lng } = e.latlng;
-          setFormData(prev => {
-            let closestCounty = prev.county;
-            let minDistance = Infinity;
-            Object.entries(TAIWAN_DATA).forEach(([name, data]) => {
-              const d = Math.pow(lat - data.center[0], 2) + Math.pow(lng - data.center[1], 2);
-              if (d < minDistance) { minDistance = d; closestCounty = name; }
-            });
-            return { 
-              ...prev, coords: [lat, lng], county: closestCounty,
-              district: prev.county === closestCounty ? prev.district : TAIWAN_DATA[closestCounty].districts[0]
-            };
+      mapInstance.current.on('click', (e) => {
+        const { lat, lng } = e.latlng;
+        setFormData(prev => {
+          let closest = prev.county;
+          let minD = Infinity;
+          Object.entries(TAIWAN_DATA).forEach(([name, data]) => {
+            const d = Math.pow(lat - data.center[0], 2) + Math.pow(lng - data.center[1], 2);
+            if (d < minD) { minD = d; closest = name; }
           });
-          setIsAdding(true);
+          return { ...prev, coords: [lat, lng], county: closest, district: TAIWAN_DATA[closest].districts[0] };
         });
-      }
+        setIsAdding(true);
+      });
     };
 
     if (!window.L) {
@@ -192,85 +164,62 @@ const App = () => {
     } else {
       initMap();
     }
-  }, [errorMsg]);
+  }, [configError]);
 
-  // 更新標記
   useEffect(() => {
     if (window.L && mapInstance.current && activeTab === 'map') {
       const L = window.L;
       markersGroup.current.clearLayers();
       heatGroup.current.clearLayers();
+      
       const counts = {};
       records.forEach(r => { counts[r.county] = (counts[r.county] || 0) + 1; });
+      
       Object.keys(counts).forEach(county => {
         const center = TAIWAN_DATA[county]?.center;
         if (center) {
-          const calculatedOpacity = Math.min((counts[county] / 25) * 0.5, 0.5);
-          L.circle(center, { radius: 12000, fillColor: '#3b82f6', fillOpacity: Math.max(0.1, calculatedOpacity), color: 'transparent', interactive: false }).addTo(heatGroup.current);
+          const opacity = Math.min((counts[county] / 25) * 0.5, 0.5);
+          L.circle(center, { radius: 12000, fillColor: '#3b82f6', fillOpacity: Math.max(0.1, opacity), color: 'transparent', interactive: false }).addTo(heatGroup.current);
         }
       });
-      records.forEach(record => {
-        const markerIcon = L.divIcon({
+
+      records.forEach(r => {
+        const icon = L.divIcon({
           className: 'custom-icon',
-          html: `<div class="w-10 h-10 rounded-full border-4 border-white shadow-xl overflow-hidden bg-blue-600 transform -translate-y-2">
-            ${record.photo ? `<img src="${record.photo}" class="w-full h-full object-cover" />` : `<div class="w-full h-full flex items-center justify-center text-white text-xs">📍</div>`}
+          html: `<div class="w-10 h-10 rounded-full border-4 border-white shadow-xl overflow-hidden bg-blue-600">
+            ${r.photo ? `<img src="${r.photo}" class="w-full h-full object-cover" />` : `<div class="w-full h-full flex items-center justify-center text-white text-xs">📍</div>`}
           </div>`,
           iconSize: [40, 40], iconAnchor: [20, 40]
         });
-        L.marker(record.coords, { icon: markerIcon }).addTo(markersGroup.current).on('click', (e) => {
-          L.DomEvent.stopPropagation(e);
-          setSelectedRecord(record);
-          mapInstance.current.flyTo(record.coords, 14);
+        L.marker(r.coords, { icon }).addTo(markersGroup.current).on('click', () => {
+          setSelectedRecord(r);
+          mapInstance.current.flyTo(r.coords, 14);
         });
       });
     }
   }, [records, activeTab]);
 
-  // --- 輔助函式 ---
-  const safeText = (text) => (typeof text === 'object' ? JSON.stringify(text) : String(text || ''));
-
-  const handlePhoto = (e) => {
-    const file = e.target.files[0];
-    if (file) {
-      const reader = new FileReader();
-      reader.onloadend = () => setFormData(prev => ({ ...prev, photo: reader.result }));
-      reader.readAsDataURL(file);
-    }
-  };
-
   const handleSave = async (e) => {
     e.preventDefault();
-    if (!user || !firebaseInstance.db) return;
+    if (!user || !db) return;
     try {
-      const recordsCol = collection(firebaseInstance.db, 'artifacts', appId, 'users', user.uid, 'records');
-      await addDoc(recordsCol, formData);
+      const colRef = collection(db, 'artifacts', appId, 'users', user.uid, 'records');
+      await addDoc(colRef, formData);
       setIsAdding(false);
       setFormData({ date: new Date().toISOString().split('T')[0], locationName: '', county: '雲林縣', district: '古坑鄉', note: '', photo: null, coords: TAIWAN_DATA["雲林縣"].center });
-    } catch (error) { setSearchError("儲存失敗: " + error.message); }
+    } catch (err) { setSearchError("儲存失敗"); }
   };
 
-  // --- 渲染畫面 ---
-  if (errorMsg) {
+  // --- 故障排除 UI ---
+  if (configError) {
     return (
-      <div className="h-screen flex flex-col items-center justify-center p-8 bg-slate-50 text-center">
-        <AlertCircle size={64} className="text-red-500 mb-4" />
-        <h1 className="text-xl font-bold mb-2">啟動失敗</h1>
-        <p className="text-sm text-slate-500 mb-6 leading-relaxed">{errorMsg}</p>
-        <div className="flex gap-4">
-          <button onClick={() => window.location.reload()} className="px-6 py-2 bg-blue-600 text-white rounded-full font-bold flex items-center gap-2">
-            <RefreshCw size={18} /> 重新整理
-          </button>
-          <button onClick={() => setDebugMode(!debugMode)} className="px-6 py-2 bg-slate-200 text-slate-600 rounded-full font-bold flex items-center gap-2">
-            <Bug size={18} /> 診斷資訊
-          </button>
-        </div>
-        {debugMode && (
-          <div className="mt-8 p-4 bg-white border rounded-xl text-left w-full max-w-sm font-mono text-[10px] overflow-auto max-h-40">
-            <p>Source: {configSource}</p>
-            <p>AppID: {appId}</p>
-            <p>Config Detect: {firebaseConfig ? "Detected" : "Missing"}</p>
-          </div>
-        )}
+      <div className="h-screen flex flex-col items-center justify-center p-8 text-center bg-slate-50">
+        <AlertCircle size={48} className="text-red-500 mb-4" />
+        <h1 className="text-xl font-bold text-slate-800 mb-2">啟動障礙診斷</h1>
+        <p className="text-sm text-slate-500 mb-6 leading-relaxed bg-white p-4 rounded-xl border">{configError}</p>
+        <button onClick={() => window.location.reload()} className="px-6 py-2 bg-blue-600 text-white rounded-full font-bold flex items-center gap-2 active:scale-95 transition-all">
+          <RefreshCw size={18} /> 重新嘗試
+        </button>
       </div>
     );
   }
@@ -278,19 +227,11 @@ const App = () => {
   return (
     <div className="flex flex-col h-screen bg-slate-50 text-slate-800 select-none overflow-hidden font-sans">
       <header className="bg-white px-4 py-3 flex justify-between items-center shadow-sm z-10 shrink-0">
-        <h1 className="text-lg font-black text-blue-600 flex items-center gap-2">
-          <MapIcon size={20} /> 成長地圖
-        </h1>
+        <h1 className="text-lg font-black text-blue-600 flex items-center gap-2"><MapIcon size={20} /> 成長地圖</h1>
         <div className="flex items-center gap-2">
-          {user ? (
-            <div className="flex items-center gap-1 text-[10px] font-bold text-green-500 bg-green-50 px-2 py-1 rounded-full uppercase">
-              <Cloud size={12} /> 連線成功
-            </div>
-          ) : (
-            <div className="flex items-center gap-1 text-[10px] font-bold text-slate-400 bg-slate-100 px-2 py-1 rounded-full uppercase">
-              <CloudOff size={12} /> 同步中
-            </div>
-          )}
+          <div className={`flex items-center gap-1 text-[10px] font-bold px-2 py-1 rounded-full uppercase ${user ? 'text-green-500 bg-green-50' : 'text-slate-400 bg-slate-100'}`}>
+            <Cloud size={12} /> {user ? '雲端同步中' : '連線中'}
+          </div>
           <div className="text-[10px] font-bold text-slate-400 bg-slate-100 px-2 py-1 rounded-full">{records.length} 則</div>
         </div>
       </header>
@@ -299,53 +240,28 @@ const App = () => {
         <div id="map-view" className="w-full h-full" style={{ visibility: activeTab === 'map' ? 'visible' : 'hidden', position: 'absolute', inset: 0, zIndex: activeTab === 'map' ? 1 : -1 }}></div>
         
         {activeTab === 'timeline' && (
-          <div className="absolute inset-0 bg-slate-50 z-20 overflow-y-auto pb-24 animate-in slide-in-from-right duration-200">
-            <div className="p-4 space-y-4">
-              <h2 className="text-xl font-black mb-4">回憶時光軸</h2>
-              {records.map(r => (
-                <div key={r.id} className="bg-white rounded-2xl overflow-hidden shadow-sm border border-slate-100 flex p-3 gap-3 active:bg-slate-50 transition-colors" onClick={() => setSelectedRecord(r)}>
-                  <div className="w-20 h-20 bg-slate-100 rounded-xl overflow-hidden shrink-0">
-                    {r.photo ? <img src={r.photo} className="w-full h-full object-cover" /> : <div className="w-full h-full flex items-center justify-center text-slate-300"><ImageIcon size={24} /></div>}
-                  </div>
-                  <div className="flex-1 min-w-0 flex flex-col justify-center">
-                    <h3 className="font-bold text-slate-800 truncate">{safeText(r.locationName)}</h3>
-                    <p className="text-xs text-slate-400 mt-1 flex items-center gap-1"><Calendar size={12} /> {safeText(r.date)}</p>
-                    <div className="mt-1 text-[10px] text-blue-500 font-bold uppercase">{safeText(r.county)} · {safeText(r.district)}</div>
-                  </div>
-                  <ChevronRight size={16} className="self-center text-slate-300" />
+          <div className="absolute inset-0 bg-slate-50 z-20 overflow-y-auto pb-24 p-4 space-y-4">
+            <h2 className="text-xl font-black mb-4">回憶時光軸</h2>
+            {records.map(r => (
+              <div key={r.id} className="bg-white rounded-2xl overflow-hidden shadow-sm border border-slate-100 flex p-3 gap-3 active:bg-slate-50 transition-colors" onClick={() => setSelectedRecord(r)}>
+                <div className="w-20 h-20 bg-slate-100 rounded-xl overflow-hidden shrink-0">
+                  {r.photo ? <img src={r.photo} className="w-full h-full object-cover" /> : <div className="w-full h-full flex items-center justify-center text-slate-300"><ImageIcon size={24} /></div>}
                 </div>
-              ))}
-              {records.length === 0 && <div className="text-center py-20 text-slate-400">目前尚無紀錄</div>}
-            </div>
-          </div>
-        )}
-
-        {activeTab === 'stats' && (
-          <div className="absolute inset-0 bg-slate-50 z-20 overflow-y-auto pb-24 animate-in slide-in-from-right duration-200">
-            <div className="p-4">
-              <h2 className="text-xl font-black mb-6">縣市冒險排行</h2>
-              {Object.entries(records.reduce((acc, r) => ({ ...acc, [r.county]: (acc[r.county] || 0) + 1 }), {}))
-                .sort((a, b) => b[1] - a[1])
-                .map(([county, count]) => (
-                  <div key={county} className="bg-white p-4 rounded-2xl shadow-sm border border-slate-100 flex justify-between items-center mb-3">
-                    <div className="flex items-center gap-3">
-                      <div className={`w-10 h-10 rounded-full flex items-center justify-center font-bold ${count > 5 ? 'bg-blue-600 text-white' : 'bg-blue-100 text-blue-600'}`}>
-                        {count}
-                      </div>
-                      <span className="font-bold text-slate-700">{safeText(county)}</span>
-                    </div>
-                    <div className="h-2 flex-1 mx-4 bg-slate-100 rounded-full overflow-hidden">
-                      <div className="h-full bg-blue-500" style={{ width: `${Math.min(count * 10, 100)}%` }}></div>
-                    </div>
-                  </div>
-                ))}
-            </div>
+                <div className="flex-1 min-w-0 flex flex-col justify-center">
+                  <h3 className="font-bold text-slate-800 truncate">{safeText(r.locationName)}</h3>
+                  <p className="text-xs text-slate-400 mt-1 flex items-center gap-1"><Calendar size={12} /> {safeText(r.date)}</p>
+                  <div className="mt-1 text-[10px] text-blue-500 font-bold uppercase">{safeText(r.county)} · {safeText(r.district)}</div>
+                </div>
+                <ChevronRight size={16} className="self-center text-slate-300" />
+              </div>
+            ))}
+            {records.length === 0 && <div className="text-center py-20 text-slate-400 font-bold">還沒有任何足跡喔</div>}
           </div>
         )}
 
         {selectedRecord && activeTab === 'map' && (
           <div className="fixed inset-0 bg-black/20 z-[100] flex items-end">
-            <div className="w-full bg-white rounded-t-[2.5rem] p-6 animate-in slide-in-from-bottom duration-300 shadow-[0_-10px_30px_rgba(0,0,0,0.1)]">
+            <div className="w-full bg-white rounded-t-[2.5rem] p-6 animate-in slide-in-from-bottom duration-300 shadow-2xl">
               <div className="w-12 h-1.5 bg-slate-200 rounded-full mx-auto mb-6" onClick={() => setSelectedRecord(null)}></div>
               <div className="flex justify-between items-start mb-4">
                 <div>
@@ -355,18 +271,14 @@ const App = () => {
                 <button onClick={() => setSelectedRecord(null)} className="p-2 bg-slate-100 rounded-full text-slate-400"><X size={20} /></button>
               </div>
               {selectedRecord.photo && <div className="mb-4"><img src={selectedRecord.photo} className="w-full h-56 object-cover rounded-3xl shadow-sm" /></div>}
-              <div className="bg-blue-50/50 p-4 rounded-2xl text-slate-600 text-sm leading-relaxed mb-6 whitespace-pre-wrap max-h-40 overflow-y-auto">
-                {safeText(selectedRecord.note || "留下了一段美好的足跡。")}
+              <div className="bg-blue-50/50 p-4 rounded-2xl text-slate-600 text-sm leading-relaxed mb-6 whitespace-pre-wrap max-h-40 overflow-y-auto font-medium">
+                {safeText(selectedRecord.note || "留下了一段美好的回憶。")}
               </div>
               <button 
-                onClick={() => { if(window.confirm("確定要刪除這段記憶嗎？")) {
-                  const recordRef = doc(firebaseInstance.db, 'artifacts', appId, 'users', user.uid, 'records', selectedRecord.id);
-                  deleteDoc(recordRef);
-                  setSelectedRecord(null);
-                }}} 
+                onClick={() => { if(window.confirm("確定要刪除嗎？")) { deleteDoc(doc(db, 'artifacts', appId, 'users', user.uid, 'records', selectedRecord.id)); setSelectedRecord(null); } }} 
                 className="w-full py-3 text-red-500 font-bold flex items-center justify-center gap-2 text-sm bg-red-50 rounded-2xl active:scale-95 transition-transform"
               >
-                <Trash2 size={16} /> 刪除這段記憶
+                <Trash2 size={16} /> 刪除紀錄
               </button>
             </div>
           </div>
@@ -377,65 +289,46 @@ const App = () => {
         <div className="fixed inset-0 bg-white z-[200] flex flex-col animate-in slide-in-from-bottom duration-300">
           <div className="flex justify-between items-center p-4 border-b">
             <button onClick={() => setIsAdding(false)} className="p-2 text-slate-400"><ChevronLeft /></button>
-            <h2 className="font-black text-slate-800">新增足跡</h2>
-            <div className="w-10 text-blue-600 flex justify-center">{isAILoading && <Loader2 size={24} className="animate-spin" />}</div>
+            <h2 className="font-black text-slate-800">新增回憶</h2>
+            <div className="w-10"></div>
           </div>
           
           <form onSubmit={handleSave} className="flex-1 overflow-y-auto p-6 space-y-5">
             <div className="grid grid-cols-2 gap-4">
-              <div>
-                <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-1">日期</label>
-                <input type="date" required value={formData.date} onChange={e => setFormData({...formData, date: e.target.value})} className="w-full bg-slate-50 border-none rounded-xl px-4 py-3 text-base outline-none focus:ring-2 focus:ring-blue-500" />
-              </div>
-              <div>
-                <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-1">縣市</label>
+              <div className="space-y-1.5"><label className="text-[10px] font-black text-slate-400 uppercase ml-1">日期</label>
+                <input type="date" required value={formData.date} onChange={e => setFormData({...formData, date: e.target.value})} className="w-full bg-slate-50 border-none rounded-xl px-4 py-3 text-base outline-none focus:ring-2 focus:ring-blue-500" /></div>
+              <div className="space-y-1.5"><label className="text-[10px] font-black text-slate-400 uppercase ml-1">縣市</label>
                 <select value={formData.county} onChange={e => handleCountyChange(e.target.value)} className="w-full bg-slate-50 border-none rounded-xl px-4 py-3 text-base outline-none appearance-none">
                   {Object.keys(TAIWAN_DATA).map(c => <option key={c} value={c}>{c}</option>)}
-                </select>
-              </div>
+                </select></div>
             </div>
-
-            <div>
-              <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-1">鄉鎮市區</label>
+            <div className="space-y-1.5"><label className="text-[10px] font-black text-slate-400 uppercase ml-1">鄉鎮市區</label>
               <select value={formData.district} onChange={e => setFormData({...formData, district: e.target.value})} className="w-full bg-slate-50 border-none rounded-xl px-4 py-3 text-base outline-none appearance-none">
                 {TAIWAN_DATA[formData.county]?.districts.map(d => <option key={d} value={d}>{d}</option>)}
-              </select>
-            </div>
-
-            <div>
-              <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-1">地點名稱</label>
-              <div className="flex gap-2">
-                <input type="text" required placeholder="如：劍湖山世界" value={formData.locationName} onChange={e => setFormData({...formData, locationName: e.target.value})} className="flex-1 bg-slate-50 border-none rounded-xl px-4 py-3 text-base outline-none focus:ring-2 focus:ring-blue-500" />
-              </div>
-              {searchError && <p className="text-[10px] text-orange-600 mt-2 ml-1 font-bold">{searchError}</p>}
-            </div>
-
-            <div>
-              <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-1">回憶照片</label>
+              </select></div>
+            <div className="space-y-1.5"><label className="text-[10px] font-black text-slate-400 uppercase ml-1">景點名稱</label>
+              <input type="text" required placeholder="如：劍湖山世界" value={formData.locationName} onChange={e => setFormData({...formData, locationName: e.target.value})} className="w-full bg-slate-50 border-none rounded-xl px-4 py-3 text-base outline-none focus:ring-2 focus:ring-blue-500" /></div>
+            <div className="space-y-1.5"><label className="text-[10px] font-black text-slate-400 uppercase ml-1">回憶照片</label>
               <div className="relative h-48 bg-slate-50 rounded-2xl border-2 border-dashed border-slate-200 flex flex-col items-center justify-center overflow-hidden">
                 {formData.photo ? <img src={formData.photo} className="w-full h-full object-cover" /> : <><Camera className="text-blue-500 mb-1" size={24} /><span className="text-xs font-bold text-slate-400">點擊上傳</span></>}
-                <input type="file" accept="image/*" className="absolute inset-0 opacity-0" onChange={handlePhoto} />
-              </div>
-            </div>
-
-            <div>
-              <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-1">成長筆記</label>
-              <textarea rows="4" value={formData.note} onChange={e => setFormData({...formData, note: e.target.value})} className="w-full bg-slate-50 border-none rounded-xl px-4 py-3 text-base outline-none resize-none" placeholder="隨手記錄..." />
-            </div>
-            
+                <input type="file" accept="image/*" className="absolute inset-0 opacity-0 cursor-pointer" onChange={(e) => {
+                  const file = e.target.files[0];
+                  if (file) { const reader = new FileReader(); reader.onloadend = () => setFormData(prev => ({ ...prev, photo: reader.result })); reader.readAsDataURL(file); }
+                }} /></div></div>
+            <div className="space-y-1.5"><label className="text-[10px] font-black text-slate-400 uppercase ml-1">成長小語</label>
+              <textarea rows="4" value={formData.note} onChange={e => setFormData({...formData, note: e.target.value})} className="w-full bg-slate-50 border-none rounded-xl px-4 py-3 text-base outline-none resize-none" placeholder="記錄一下..." /></div>
             <button type="submit" disabled={!user} className="w-full py-4 bg-blue-600 text-white rounded-2xl font-black shadow-xl shadow-blue-100 active:scale-95 transition-transform flex items-center justify-center gap-2">
-              <Cloud size={20} /> 儲存到雲端
+              <Cloud size={20} /> 存入回憶
             </button>
           </form>
         </div>
       )}
 
       <footer className="bg-white border-t px-6 py-2 pb-8 flex justify-between items-center z-50 shrink-0">
-        <button onClick={() => setActiveTab('map')} className={`flex flex-col items-center gap-1 ${activeTab === 'map' ? 'text-blue-600' : 'text-slate-300'}`}><MapIcon size={24} /><span className="text-[10px] font-bold">地圖</span></button>
-        <button onClick={() => setActiveTab('timeline')} className={`flex flex-col items-center gap-1 ${activeTab === 'timeline' ? 'text-blue-600' : 'text-slate-300'}`}><List size={24} /><span className="text-[10px] font-bold">時光軸</span></button>
+        <button onClick={() => setActiveTab('map')} className={`flex flex-col items-center gap-1 ${activeTab === 'map' ? 'text-blue-600' : 'text-slate-300'}`}><MapIcon size={24} /><span className="text-[10px] font-bold font-black">地圖</span></button>
+        <button onClick={() => setActiveTab('timeline')} className={`flex flex-col items-center gap-1 ${activeTab === 'timeline' ? 'text-blue-600' : 'text-slate-300'}`}><List size={24} /><span className="text-[10px] font-bold font-black">時光軸</span></button>
         <div className="relative -top-6"><button onClick={() => setIsAdding(true)} className="w-14 h-14 bg-blue-600 text-white rounded-full shadow-lg shadow-blue-200 flex items-center justify-center active:scale-90 transition-transform"><Plus size={32} /></button></div>
-        <button onClick={() => setActiveTab('stats')} className={`flex flex-col items-center gap-1 ${activeTab === 'stats' ? 'text-blue-600' : 'text-slate-300'}`}><BarChart3 size={24} /><span className="text-[10px] font-bold">統計</span></button>
-        <div className="w-6"></div>
+        <div className="w-12 text-center opacity-0"><BarChart3 /></div>
       </footer>
       <style>{`.custom-icon { background: none; border: none; } .leaflet-container { font-family: inherit; } input, select, textarea { font-size: 16px !important; }`}</style>
     </div>
