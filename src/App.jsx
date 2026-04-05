@@ -55,6 +55,7 @@ const App = () => {
   const [isAdding, setIsAdding] = useState(false);
   const [isEditing, setIsEditing] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
+  const [isCompressing, setIsCompressing] = useState(false); // 新增壓縮狀態
   const [isDeleting, setIsDeleting] = useState(false);
   const [selectedRecord, setSelectedRecord] = useState(null);
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
@@ -70,6 +71,64 @@ const App = () => {
 
   const mapInstance = useRef(null);
   const markersGroup = useRef(null);
+
+  // --- 圖片壓縮邏輯 ---
+  const compressImage = (file) => {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.readAsDataURL(file);
+      reader.onload = (event) => {
+        const img = new Image();
+        img.src = event.target.result;
+        img.onload = () => {
+          const canvas = document.createElement('canvas');
+          let width = img.width;
+          let height = img.height;
+          
+          // 最大邊長限制在 800px 以確保檔案小於 1MB
+          const MAX_SIZE = 800;
+          if (width > height) {
+            if (width > MAX_SIZE) {
+              height *= MAX_SIZE / width;
+              width = MAX_SIZE;
+            }
+          } else {
+            if (height > MAX_SIZE) {
+              width *= MAX_SIZE / height;
+              height = MAX_SIZE;
+            }
+          }
+          
+          canvas.width = width;
+          canvas.height = height;
+          const ctx = canvas.getContext('2d');
+          ctx.drawImage(img, 0, 0, width, height);
+          
+          // 使用 JPEG 格式並設定 0.6 品質
+          const compressedBase64 = canvas.toDataURL('image/jpeg', 0.6);
+          resolve(compressedBase64);
+        };
+        img.onerror = (err) => reject(err);
+      };
+      reader.onerror = (err) => reject(err);
+    });
+  };
+
+  const handleFileChange = async (e) => {
+    const file = e.target.files[0];
+    if (file) {
+      setIsCompressing(true);
+      setErrorMsg('');
+      try {
+        const compressedData = await compressImage(file);
+        setFormData(prev => ({ ...prev, photo: compressedData }));
+      } catch (err) {
+        setErrorMsg("圖片壓縮失敗，請換一張試試");
+      } finally {
+        setIsCompressing(false);
+      }
+    }
+  };
 
   // --- 計算年齡 (強化版) ---
   const getAgeAtDate = (birthdayStr, targetDateInput) => {
@@ -111,11 +170,10 @@ const App = () => {
     } catch (err) { setErrorMsg("初始化異常：" + String(err.message)); }
   }, []);
 
-  // --- 監聽資料 (修正路徑為 5 節段符合 Rule 1) ---
+  // --- 監聽資料 ---
   useEffect(() => {
     if (!user || !db || !isCodeAuthorized) return;
     
-    // 正確的 Public 存儲路徑 (5 節段)
     const recordsCol = collection(db, 'artifacts', appId, 'public', 'data', `family_records_${familyCode}`);
     const unsubRecords = onSnapshot(recordsCol, (snap) => {
       const data = snap.docs.map(doc => ({ ...doc.data(), id: doc.id }));
@@ -125,7 +183,6 @@ const App = () => {
       if (err.code === 'permission-denied') setErrorMsg("權限不足，請檢查 Firebase Rules");
     });
 
-    // 配置文件路徑 (6 節段，符合 doc 規範)
     const settingsDoc = doc(db, 'artifacts', appId, 'public', 'data', 'family_configs', familyCode);
     getDoc(settingsDoc).then(s => {
       if (s.exists()) setBabyBirthday(s.data().birthday || '');
@@ -403,14 +460,31 @@ const App = () => {
               <div className="space-y-1"><label className="text-[10px] font-black text-slate-400 uppercase">鄉鎮市區</label><select value={formData.district} onChange={e => setFormData({...formData, district: e.target.value})} className="w-full bg-slate-50 rounded-xl px-4 py-3 text-sm outline-none">{TAIWAN_DATA[formData.county].districts.map(d => <option key={d} value={d}>{d}</option>)}</select></div>
               <div className="space-y-1"><label className="text-[10px] font-black text-slate-400 uppercase">地點名稱 (必填)</label><input type="text" required placeholder="例如：飛牛牧場" value={formData.locationName} onChange={e => setFormData({...formData, locationName: e.target.value})} className="w-full bg-slate-50 rounded-xl px-4 py-3 text-sm outline-none font-bold" /></div>
               <div className="space-y-1">
-                <label className="text-[10px] font-black text-slate-400 uppercase">照片回憶</label>
-                <div className="relative h-40 bg-slate-50 rounded-2xl border-2 border-dashed border-slate-200 flex flex-col items-center justify-center overflow-hidden">
-                  {formData.photo ? <img src={formData.photo} className="w-full h-full object-cover" /> : <><Camera size={24} className="text-slate-300"/><span className="text-xs text-slate-400">上傳照片</span></>}
-                  <input type="file" accept="image/*" className="absolute inset-0 opacity-0" onChange={(e) => { const file = e.target.files[0]; if(file) { const reader = new FileReader(); reader.onloadend = () => setFormData(prev => ({ ...prev, photo: reader.result })); reader.readAsDataURL(file); } }} />
+                <label className="text-[10px] font-black text-slate-400 uppercase flex justify-between items-center">
+                  照片回憶 {isCompressing && <span className="text-blue-500 animate-pulse text-[9px]">壓縮處理中...</span>}
+                </label>
+                <div className={`relative h-40 bg-slate-50 rounded-2xl border-2 border-dashed ${isCompressing ? 'border-blue-300 bg-blue-50/30' : 'border-slate-200'} flex flex-col items-center justify-center overflow-hidden transition-colors`}>
+                  {formData.photo ? (
+                    <img src={formData.photo} className="w-full h-full object-cover" />
+                  ) : (
+                    <>
+                      {isCompressing ? <Loader2 size={24} className="text-blue-500 animate-spin" /> : <Camera size={24} className="text-slate-300"/>}
+                      <span className="text-xs text-slate-400 font-sans">{isCompressing ? '正在最佳化照片' : '上傳照片'}</span>
+                    </>
+                  )}
+                  <input type="file" accept="image/*" className="absolute inset-0 opacity-0 cursor-pointer" onChange={handleFileChange} disabled={isCompressing || isSaving} />
                 </div>
+                {formData.photo && !isCompressing && <p className="text-[9px] text-green-500 text-right mt-1 font-bold">✓ 已成功壓縮 (符合雲端規格)</p>}
               </div>
               <div className="space-y-1"><label className="text-[10px] font-black text-slate-400 uppercase">筆記</label><textarea rows="3" value={formData.note} onChange={e => setFormData({...formData, note: e.target.value})} className="w-full bg-slate-50 rounded-xl px-4 py-3 text-sm outline-none" placeholder="想寫點什麼..." /></div>
-              <button type="submit" disabled={isSaving} className="w-full py-4 bg-blue-600 text-white rounded-2xl font-black shadow-lg disabled:bg-slate-300 flex items-center justify-center gap-2">{isSaving ? <Loader2 className="animate-spin" /> : <Cloud size={20} />} {isSaving ? '正在同步...' : (isEditing ? '更新紀錄' : '存入回憶')}</button>
+              <button 
+                type="submit" 
+                disabled={isSaving || isCompressing} 
+                className={`w-full py-4 rounded-2xl font-black shadow-lg flex items-center justify-center gap-2 transition-all ${isSaving || isCompressing ? 'bg-slate-300 text-slate-500 cursor-not-allowed' : 'bg-blue-600 text-white active:scale-95'}`}
+              >
+                {isSaving ? <Loader2 className="animate-spin" /> : <Cloud size={20} />} 
+                {isCompressing ? '照片處理中...' : (isSaving ? '正在同步...' : (isEditing ? '更新紀錄' : '存入回憶'))}
+              </button>
             </form>
           </div>
         )}
