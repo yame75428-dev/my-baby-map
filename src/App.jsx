@@ -32,7 +32,7 @@ const TAIWAN_DATA = {
   "雲林縣": { center: [23.7092, 120.4313], districts: ["斗六市", "斗南鎮", "虎尾鎮", "西螺鎮", "土庫鎮", "北港鎮", "古坑鄉", "大埤鄉", "莿桐鄉", "林內鄉", "二崙鄉", "崙背鄉", "麥寮鄉", "東勢鄉", "褒忠鄉", "台西鄉", "元長鄉", "四湖鄉", "口湖鄉", "水林鄉"] },
   "嘉義縣": { center: [23.4519, 120.2555], districts: ["太保市", "朴子市", "布袋鎮", "大林鎮", "民雄鄉", "溪口鄉", "新港鄉", "六腳鄉", "東石鄉", "義竹鄉", "鹿草鄉", "水上鄉", "中埔鄉", "竹崎鄉", "梅山鄉", "番路鄉", "大埔鄉", "阿里山鄉"] },
   "嘉義市": { center: [23.4815, 120.4537], districts: ["東區", "西區"] },
-  "屏東縣": { center: [22.6761, 120.4885], districts: ["屏東市", "潮州鎮", "東港鎮", "恆春鎮", "萬丹鄉", "長治鄉", "麟洛鄉", "九如鄉", "里港鄉", "高樹鄉", "鹽埔鄉", "內埔鄉", "竹田鄉", "萬巒鄉", "內埔鄉", "新埤鄉", "枋寮鄉", "新園鄉", "崁頂鄉", "林邊鄉", "南州鄉", "佳冬鄉", "琉球鄉", "車城鄉", "滿州鄉", "枋山鄉", "三地門鄉", "霧臺鄉", "瑪家鄉", "泰武鄉", "來義鄉", "春日鄉", "獅子鄉", "牡丹鄉"] },
+  "屏東縣": { center: [22.6761, 120.4885], districts: ["屏東市", "潮州鎮", "東港鎮", "恆春鎮", "萬丹鄉", "長治鄉", "麟洛鄉", "九如鄉", "里港鄉", "高樹鄉", "鹽埔鄉", "內埔鄉", "竹田鄉", "萬巒鄉", "新埤鄉", "枋寮鄉", "新園鄉", "崁頂鄉", "林邊鄉", "南州鄉", "佳冬鄉", "琉球鄉", "車城鄉", "滿州鄉", "枋山鄉", "三地門鄉", "霧臺鄉", "瑪家鄉", "泰武鄉", "來義鄉", "春日鄉", "獅子鄉", "牡丹鄉"] },
   "宜蘭縣": { center: [24.7021, 121.7377], districts: ["宜蘭市", "羅東鎮", "蘇澳鎮", "頭城鎮", "礁溪鄉", "壯圍鄉", "員山鄉", "冬山鄉", "五結鄉", "三星鄉", "大同鄉", "南澳鄉"] },
   "花蓮縣": { center: [23.9872, 121.6016], districts: ["花蓮市", "鳳林鎮", "玉里鎮", "新城鄉", "吉安鄉", "壽豐鄉", "光復鄉", "豐濱鄉", "瑞穗鄉", "富里鄉", "秀林鄉", "萬榮鄉", "卓溪鄉"] },
   "台東縣": { center: [22.7583, 121.1444], districts: ["台東市", "成功鎮", "關山鎮", "卑南鄉", "大武鄉", "太麻里鄉", "東河鄉", "長濱鄉", "鹿野鄉", "池上鄉", "綠島鄉", "延平鄉", "海端鄉", "達仁鄉", "金峰鄉", "蘭嶼鄉"] },
@@ -65,49 +65,14 @@ const App = () => {
   const heatGroup = useRef(null);
   const tempMarker = useRef(null);
 
-  // --- Firebase Auth 效果 ---
-  useEffect(() => {
-    const initAuth = async () => {
-      try {
-        if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
-          await signInWithCustomToken(auth, __initial_auth_token);
-        } else {
-          await signInAnonymously(auth);
-        }
-      } catch (error) {
-        console.error("Auth error:", error);
-      }
-    };
-    initAuth();
-    const unsubscribe = onAuthStateChanged(auth, setUser);
-    return () => unsubscribe();
-  }, []);
+  // --- 邏輯函數 ---
 
-  // --- Firestore 資料抓取 效果 ---
-  useEffect(() => {
-    if (!user) return;
+  // 輔助函式：確保顯示文字皆為字串，防止 React 渲染物件錯誤
+  const safeText = (text) => (typeof text === 'object' ? JSON.stringify(text) : String(text || ''));
 
-    // 定義資料路徑 (Private User Data)
-    const recordsCol = collection(db, 'artifacts', appId, 'users', user.uid, 'records');
-    
-    const unsubscribe = onSnapshot(recordsCol, (snapshot) => {
-      const data = snapshot.docs.map(doc => ({
-        ...doc.data(),
-        id: doc.id
-      }));
-      // 按日期降序排列
-      data.sort((a, b) => new Date(b.date) - new Date(a.date));
-      setRecords(data);
-    }, (error) => {
-      console.error("Firestore error:", error);
-    });
-
-    return () => unsubscribe();
-  }, [user]);
-
-  // --- Gemini API 輔助函式 ---
+  // Gemini API 調用
   const callGeminiAPI = async (prompt, systemPrompt = "") => {
-    const apiKey = ""; // 使用環境提供的 Key
+    const apiKey = "";
     const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key=${apiKey}`;
     
     let retries = 0;
@@ -133,17 +98,123 @@ const App = () => {
     }
   };
 
-  // --- 地圖初始化 效果 ---
+  // 照片處理
+  const handlePhoto = (e) => {
+    const file = e.target.files[0];
+    if (file) {
+      const reader = new FileReader();
+      reader.onloadend = () => {
+        setFormData(prev => ({ ...prev, photo: reader.result }));
+      };
+      reader.readAsDataURL(file);
+    }
+  };
+
+  // 選擇紀錄並飛往地圖位置
+  const handleSelectRecord = (record) => {
+    setSelectedRecord(record);
+    setActiveTab('map');
+    if (mapInstance.current) {
+      setTimeout(() => {
+        mapInstance.current.invalidateSize();
+        mapInstance.current.flyTo(record.coords, 14);
+      }, 300);
+    }
+  };
+
+  // 縣市變更
+  const handleCountyChange = (newCounty) => {
+    const countyData = TAIWAN_DATA[newCounty];
+    setFormData(prev => ({
+      ...prev,
+      county: newCounty,
+      district: countyData.districts[0],
+      coords: countyData.center
+    }));
+    if (mapInstance.current) mapInstance.current.flyTo(countyData.center, 12);
+  };
+
+  // AI 功能 1：景點小攻略
+  const handleSpotAssistant = async () => {
+    if (!formData.locationName) return setSearchError('請先輸入景點名稱');
+    setIsAILoading(true);
+    try {
+      const prompt = `請為景點「${formData.county}${formData.district}${formData.locationName}」提供一段約 80 字的溫馨介紹，重點在為什麼適合親子同遊，並給出一個實用的建議。`;
+      const result = await callGeminiAPI(prompt, "你是一位親切的台灣親子旅遊導覽員。");
+      if (result) {
+        setFormData(prev => ({ 
+          ...prev, 
+          note: prev.note ? `${prev.note}\n\n✨ AI 小攻略：\n${String(result)}` : `✨ AI 小攻略：\n${String(result)}` 
+        }));
+      }
+    } catch (e) { setSearchError('AI 助手忙碌中'); } finally { setIsAILoading(false); }
+  };
+
+  // AI 功能 2：美化日記
+  const handleDiaryAssistant = async () => {
+    if (!formData.note) return setSearchError('請先在記事欄寫一點點今天的內容');
+    setIsAILoading(true);
+    try {
+      const prompt = `使用者在「${formData.locationName}」留下了筆記：『${formData.note}』。請擴充成一段感人、溫暖的成長日記（約 150 字），記錄親子時光。`;
+      const result = await callGeminiAPI(prompt, "你是一位感性且愛孩子的家長作家。");
+      if (result) setFormData(prev => ({ ...prev, note: String(result) }));
+    } catch (e) { setSearchError('AI 助手忙碌中'); } finally { setIsAILoading(false); }
+  };
+
+  // 地點搜尋
+  const searchLocation = async () => {
+    if (!formData.locationName) return setSearchError('請輸入景點名稱');
+    setIsSearching(true);
+    try {
+      const queryStr = `台灣 ${formData.county} ${formData.district} ${formData.locationName}`;
+      const response = await fetch(`https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(queryStr)}&limit=1`);
+      const data = await response.json();
+      if (data?.[0]) {
+        const coords = [parseFloat(data[0].lat), parseFloat(data[0].lon)];
+        setFormData(prev => ({ ...prev, coords }));
+        if (mapInstance.current) mapInstance.current.flyTo(coords, 16);
+      } else setSearchError('找不到地點，請在地圖上手動點選');
+    } catch (e) { setSearchError('搜尋連線失敗'); } finally { setIsSearching(false); }
+  };
+
+  // --- Firebase 副作用 ---
+
+  useEffect(() => {
+    const initAuth = async () => {
+      try {
+        if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
+          await signInWithCustomToken(auth, __initial_auth_token);
+        } else {
+          await signInAnonymously(auth);
+        }
+      } catch (error) { console.error("Auth error:", error); }
+    };
+    initAuth();
+    const unsubscribe = onAuthStateChanged(auth, setUser);
+    return () => unsubscribe();
+  }, []);
+
+  useEffect(() => {
+    if (!user) return;
+    const recordsCol = collection(db, 'artifacts', appId, 'users', user.uid, 'records');
+    const unsubscribe = onSnapshot(recordsCol, (snapshot) => {
+      const data = snapshot.docs.map(doc => ({ ...doc.data(), id: doc.id }));
+      data.sort((a, b) => new Date(b.date) - new Date(a.date));
+      setRecords(data);
+    }, (err) => console.error("Firestore error:", err));
+    return () => unsubscribe();
+  }, [user]);
+
+  // --- 地圖渲染 ---
+
   useEffect(() => {
     if (typeof window !== 'undefined' && !mapInstance.current) {
       if (!document.getElementById('leaflet-css')) {
         const link = document.createElement('link');
-        link.id = 'leaflet-css';
-        link.rel = 'stylesheet';
+        link.id = 'leaflet-css'; link.rel = 'stylesheet';
         link.href = 'https://unpkg.com/leaflet@1.9.4/dist/leaflet.css';
         document.head.appendChild(link);
       }
-
       const script = document.createElement('script');
       script.src = 'https://unpkg.com/leaflet@1.9.4/dist/leaflet.js';
       script.onload = () => {
@@ -176,28 +247,28 @@ const App = () => {
     }
   }, []);
 
-  // --- 地圖標記渲染 效果 ---
+  useEffect(() => {
+    if (activeTab === 'map' && mapInstance.current) {
+      const timer = setTimeout(() => { mapInstance.current.invalidateSize(); }, 300);
+      return () => clearTimeout(timer);
+    }
+  }, [activeTab]);
+
   useEffect(() => {
     if (window.L && mapInstance.current && activeTab === 'map') {
       const L = window.L;
       markersGroup.current.clearLayers();
       heatGroup.current.clearLayers();
-
       const counts = {};
       records.forEach(r => { counts[r.county] = (counts[r.county] || 0) + 1; });
-
       Object.keys(counts).forEach(county => {
         const center = TAIWAN_DATA[county].center;
         if (center) {
           const count = counts[county];
-          const opacityLevel = Math.min(count, 25);
-          const calculatedOpacity = (opacityLevel / 25) * 0.5;
-          L.circle(center, {
-            radius: 12000, fillColor: '#3b82f6', fillOpacity: Math.max(0.1, calculatedOpacity), color: 'transparent', interactive: false
-          }).addTo(heatGroup.current);
+          const calculatedOpacity = Math.min((count / 25) * 0.5, 0.5);
+          L.circle(center, { radius: 12000, fillColor: '#3b82f6', fillOpacity: Math.max(0.1, calculatedOpacity), color: 'transparent', interactive: false }).addTo(heatGroup.current);
         }
       });
-
       records.forEach(record => {
         const markerIcon = L.divIcon({
           className: 'custom-icon',
@@ -215,28 +286,6 @@ const App = () => {
     }
   }, [records, activeTab]);
 
-  // --- AI 助手邏輯 ---
-  const handleSpotAssistant = async () => {
-    if (!formData.locationName) return setSearchError('請先輸入景點名稱');
-    setIsAILoading(true);
-    try {
-      const prompt = `請為景點「${formData.county}${formData.district}${formData.locationName}」提供一段約 80 字的溫馨介紹，重點在為什麼適合親子同遊，並給出一個實用的建議。`;
-      const result = await callGeminiAPI(prompt, "你是一位親切的台灣親子旅遊導覽員。");
-      if (result) setFormData(prev => ({ ...prev, note: prev.note ? `${prev.note}\n\n✨ AI 小攻略：\n${result}` : `✨ AI 小攻略：\n${result}` }));
-    } catch (e) { setSearchError('AI 助手忙碌中'); } finally { setIsAILoading(false); }
-  };
-
-  const handleDiaryAssistant = async () => {
-    if (!formData.note) return setSearchError('請先在記事欄寫一點點今天的內容');
-    setIsAILoading(true);
-    try {
-      const prompt = `使用者在「${formData.locationName}」留下了筆記：『${formData.note}』。請擴充成一段感人、溫暖的成長日記（約 150 字），記錄親子時光。`;
-      const result = await callGeminiAPI(prompt, "你是一位感性且愛孩子的家長作家。");
-      if (result) setFormData(prev => ({ ...prev, note: result }));
-    } catch (e) { setSearchError('AI 助手忙碌中'); } finally { setIsAILoading(false); }
-  };
-
-  // --- CRUD 操作 ---
   const handleSave = async (e) => {
     e.preventDefault();
     if (!user) return;
@@ -245,9 +294,7 @@ const App = () => {
       await addDoc(recordsCol, formData);
       setIsAdding(false);
       setFormData({ date: new Date().toISOString().split('T')[0], locationName: '', county: '雲林縣', district: '古坑鄉', note: '', photo: null, coords: TAIWAN_DATA["雲林縣"].center });
-    } catch (error) {
-      setSearchError("儲存失敗，請檢查網路。");
-    }
+    } catch (error) { setSearchError("儲存失敗"); }
   };
 
   const deleteRecord = async (id) => {
@@ -256,24 +303,7 @@ const App = () => {
       const recordRef = doc(db, 'artifacts', appId, 'users', user.uid, 'records', id);
       await deleteDoc(recordRef);
       setSelectedRecord(null);
-    } catch (error) {
-      setSearchError("刪除失敗。");
-    }
-  };
-
-  const searchLocation = async () => {
-    if (!formData.locationName) return setSearchError('請輸入景點名稱');
-    setIsSearching(true);
-    try {
-      const query = `台灣 ${formData.county} ${formData.district} ${formData.locationName}`;
-      const response = await fetch(`https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(query)}&limit=1`);
-      const data = await response.json();
-      if (data?.[0]) {
-        const coords = [parseFloat(data[0].lat), parseFloat(data[0].lon)];
-        setFormData(prev => ({ ...prev, coords }));
-        if (mapInstance.current) mapInstance.current.flyTo(coords, 16);
-      } else setSearchError('找不到地點，請在地圖上手動點選');
-    } catch (e) { setSearchError('搜尋連線失敗'); } finally { setIsSearching(false); }
+    } catch (error) { setSearchError("刪除失敗"); }
   };
 
   return (
@@ -309,9 +339,9 @@ const App = () => {
                     {r.photo ? <img src={r.photo} className="w-full h-full object-cover" /> : <div className="w-full h-full flex items-center justify-center text-slate-300"><ImageIcon size={24} /></div>}
                   </div>
                   <div className="flex-1 min-w-0 flex flex-col justify-center">
-                    <h3 className="font-bold text-slate-800 truncate">{r.locationName}</h3>
-                    <p className="text-xs text-slate-400 mt-1 flex items-center gap-1"><Calendar size={12} /> {r.date}</p>
-                    <div className="mt-1 text-[10px] text-blue-500 font-bold uppercase">{r.county} · {r.district}</div>
+                    <h3 className="font-bold text-slate-800 truncate">{safeText(r.locationName)}</h3>
+                    <p className="text-xs text-slate-400 mt-1 flex items-center gap-1"><Calendar size={12} /> {safeText(r.date)}</p>
+                    <div className="mt-1 text-[10px] text-blue-500 font-bold uppercase">{safeText(r.county)} · {safeText(r.district)}</div>
                   </div>
                   <ChevronRight size={16} className="self-center text-slate-300" />
                 </div>
@@ -333,7 +363,7 @@ const App = () => {
                       <div className={`w-10 h-10 rounded-full flex items-center justify-center font-bold ${count > 5 ? 'bg-blue-600 text-white' : 'bg-blue-100 text-blue-600'}`}>
                         {count}
                       </div>
-                      <span className="font-bold text-slate-700">{county}</span>
+                      <span className="font-bold text-slate-700">{safeText(county)}</span>
                     </div>
                     <div className="h-2 flex-1 mx-4 bg-slate-100 rounded-full overflow-hidden">
                       <div className="h-full bg-blue-500" style={{ width: `${Math.min(count * 10, 100)}%` }}></div>
@@ -350,17 +380,17 @@ const App = () => {
               <div className="w-12 h-1.5 bg-slate-200 rounded-full mx-auto mb-6" onClick={() => setSelectedRecord(null)}></div>
               <div className="flex justify-between items-start mb-4">
                 <div>
-                  <h3 className="text-2xl font-black text-slate-800">{selectedRecord.locationName}</h3>
-                  <p className="text-sm text-slate-400 font-bold mt-1 tracking-tighter">{selectedRecord.date} · {selectedRecord.county}{selectedRecord.district}</p>
+                  <h3 className="text-2xl font-black text-slate-800">{safeText(selectedRecord.locationName)}</h3>
+                  <p className="text-sm text-slate-400 font-bold mt-1 tracking-tighter">{safeText(selectedRecord.date)} · {safeText(selectedRecord.county)}{safeText(selectedRecord.district)}</p>
                 </div>
                 <button onClick={() => setSelectedRecord(null)} className="p-2 bg-slate-100 rounded-full text-slate-400"><X size={20} /></button>
               </div>
               {selectedRecord.photo && <div className="mb-4"><img src={selectedRecord.photo} className="w-full h-56 object-cover rounded-3xl shadow-sm" /></div>}
               <div className="bg-blue-50/50 p-4 rounded-2xl text-slate-600 text-sm leading-relaxed mb-6 whitespace-pre-wrap max-h-40 overflow-y-auto">
-                {selectedRecord.note || "留下了一段美好的足跡。"}
+                {safeText(selectedRecord.note || "留下了一段美好的足跡。")}
               </div>
               <button onClick={() => deleteRecord(selectedRecord.id)} className="w-full py-3 text-red-500 font-bold flex items-center justify-center gap-2 text-sm bg-red-50 rounded-2xl active:scale-95 transition-transform">
-                <Trash2 size={16} /> 刪除這段記憶
+                <Trash2 size={16} /> 刪除這段回憶
               </button>
             </div>
           </div>
@@ -436,7 +466,7 @@ const App = () => {
         <button onClick={() => setActiveTab('stats')} className={`flex flex-col items-center gap-1 ${activeTab === 'stats' ? 'text-blue-600' : 'text-slate-300'}`}><BarChart3 size={24} /><span className="text-[10px] font-bold">統計</span></button>
         <div className="w-6"></div>
       </footer>
-      <style>{`.custom-icon, .preview-marker { background: none; border: none; } .leaflet-container { font-family: inherit; } input, select, textarea { font-size: 16px !important; }`}</style>
+      <style>{`.custom-icon { background: none; border: none; } .leaflet-container { font-family: inherit; } input, select, textarea { font-size: 16px !important; }`}</style>
     </div>
   );
 };
