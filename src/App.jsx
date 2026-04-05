@@ -1,19 +1,36 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { initializeApp } from 'firebase/app';
+import { initializeApp, getApps, getApp } from 'firebase/app';
 import { getAuth, signInWithCustomToken, signInAnonymously, onAuthStateChanged } from 'firebase/auth';
 import { getFirestore, collection, addDoc, deleteDoc, doc, onSnapshot, query } from 'firebase/firestore';
 import { 
   Camera, Calendar, MapPin, Plus, Trash2, History, ChevronRight, X, 
   Image as ImageIcon, Map as MapIcon, BarChart3, List, ChevronLeft, 
-  Search, Loader2, Navigation, Sparkles, Wand2, Cloud, CloudOff 
+  Search, Loader2, Navigation, Sparkles, Wand2, Cloud, CloudOff, AlertCircle 
 } from 'lucide-react';
 
-// --- Firebase 配置 (由環境提供) ---
-const firebaseConfig = JSON.parse(__firebase_config);
-const app = initializeApp(firebaseConfig);
-const auth = getAuth(app);
-const db = getFirestore(app);
-const appId = typeof __app_id !== 'undefined' ? __app_id : 'baby-growth-map';
+// --- 安全讀取配置 ---
+let firebaseConfig = null;
+let appId = 'baby-growth-map';
+
+try {
+  // 優先嘗試讀取環境提供的全域變數
+  if (typeof __firebase_config !== 'undefined') {
+    firebaseConfig = JSON.parse(__firebase_config);
+  }
+  if (typeof __app_id !== 'undefined') {
+    appId = __app_id;
+  }
+} catch (e) {
+  console.error("Firebase 配置解析失敗:", e);
+}
+
+// 初始化 Firebase 實例 (僅在配置存在時)
+let app, auth, db;
+if (firebaseConfig) {
+  app = getApps().length > 0 ? getApp() : initializeApp(firebaseConfig);
+  auth = getAuth(app);
+  db = getFirestore(app);
+}
 
 // 台灣行政區劃資料
 const TAIWAN_DATA = {
@@ -65,12 +82,34 @@ const App = () => {
   const heatGroup = useRef(null);
   const tempMarker = useRef(null);
 
-  // --- 邏輯函數 ---
+  // --- 故障處理畫面 ---
+  if (!firebaseConfig) {
+    return (
+      <div className="h-screen flex flex-col items-center justify-center p-8 text-center bg-slate-50">
+        <div className="w-16 h-16 bg-red-100 text-red-500 rounded-full flex items-center justify-center mb-4">
+          <AlertCircle size={32} />
+        </div>
+        <h1 className="text-xl font-bold text-slate-800 mb-2">尚未偵測到 Firebase 配置</h1>
+        <p className="text-sm text-slate-500 mb-6 leading-relaxed">
+          請確保您已在 Vercel 的專案設定中，正確新增了環境變數 <b>__firebase_config</b>。
+        </p>
+        <div className="bg-white p-4 rounded-xl border text-left w-full max-w-sm">
+          <p className="text-[10px] font-black text-slate-400 uppercase mb-2">如何解決？</p>
+          <ol className="text-xs text-slate-600 space-y-2 list-decimal ml-4">
+            <li>前往 Vercel Project Settings</li>
+            <li>選擇 Environment Variables</li>
+            <li>Key 輸入 <code className="bg-slate-100 px-1">__firebase_config</code></li>
+            <li>Value 貼入您的 Firebase Config JSON</li>
+            <li>重新 Deploy 專案</li>
+          </ol>
+        </div>
+      </div>
+    );
+  }
 
-  // 輔助函式：確保顯示文字皆為字串，防止 React 渲染物件錯誤
+  // --- 邏輯函數 ---
   const safeText = (text) => (typeof text === 'object' ? JSON.stringify(text) : String(text || ''));
 
-  // Gemini API 調用
   const callGeminiAPI = async (prompt, systemPrompt = "") => {
     const apiKey = "";
     const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key=${apiKey}`;
@@ -98,19 +137,15 @@ const App = () => {
     }
   };
 
-  // 照片處理
   const handlePhoto = (e) => {
     const file = e.target.files[0];
     if (file) {
       const reader = new FileReader();
-      reader.onloadend = () => {
-        setFormData(prev => ({ ...prev, photo: reader.result }));
-      };
+      reader.onloadend = () => setFormData(prev => ({ ...prev, photo: reader.result }));
       reader.readAsDataURL(file);
     }
   };
 
-  // 選擇紀錄並飛往地圖位置
   const handleSelectRecord = (record) => {
     setSelectedRecord(record);
     setActiveTab('map');
@@ -122,7 +157,6 @@ const App = () => {
     }
   };
 
-  // 縣市變更
   const handleCountyChange = (newCounty) => {
     const countyData = TAIWAN_DATA[newCounty];
     setFormData(prev => ({
@@ -134,7 +168,6 @@ const App = () => {
     if (mapInstance.current) mapInstance.current.flyTo(countyData.center, 12);
   };
 
-  // AI 功能 1：景點小攻略
   const handleSpotAssistant = async () => {
     if (!formData.locationName) return setSearchError('請先輸入景點名稱');
     setIsAILoading(true);
@@ -150,7 +183,6 @@ const App = () => {
     } catch (e) { setSearchError('AI 助手忙碌中'); } finally { setIsAILoading(false); }
   };
 
-  // AI 功能 2：美化日記
   const handleDiaryAssistant = async () => {
     if (!formData.note) return setSearchError('請先在記事欄寫一點點今天的內容');
     setIsAILoading(true);
@@ -161,7 +193,6 @@ const App = () => {
     } catch (e) { setSearchError('AI 助手忙碌中'); } finally { setIsAILoading(false); }
   };
 
-  // 地點搜尋
   const searchLocation = async () => {
     if (!formData.locationName) return setSearchError('請輸入景點名稱');
     setIsSearching(true);
@@ -178,7 +209,6 @@ const App = () => {
   };
 
   // --- Firebase 副作用 ---
-
   useEffect(() => {
     const initAuth = async () => {
       try {
@@ -195,7 +225,7 @@ const App = () => {
   }, []);
 
   useEffect(() => {
-    if (!user) return;
+    if (!user || !db) return;
     const recordsCol = collection(db, 'artifacts', appId, 'users', user.uid, 'records');
     const unsubscribe = onSnapshot(recordsCol, (snapshot) => {
       const data = snapshot.docs.map(doc => ({ ...doc.data(), id: doc.id }));
@@ -206,7 +236,6 @@ const App = () => {
   }, [user]);
 
   // --- 地圖渲染 ---
-
   useEffect(() => {
     if (typeof window !== 'undefined' && !mapInstance.current) {
       if (!document.getElementById('leaflet-css')) {
@@ -288,7 +317,7 @@ const App = () => {
 
   const handleSave = async (e) => {
     e.preventDefault();
-    if (!user) return;
+    if (!user || !db) return;
     try {
       const recordsCol = collection(db, 'artifacts', appId, 'users', user.uid, 'records');
       await addDoc(recordsCol, formData);
@@ -298,7 +327,7 @@ const App = () => {
   };
 
   const deleteRecord = async (id) => {
-    if (!user) return;
+    if (!user || !db) return;
     try {
       const recordRef = doc(db, 'artifacts', appId, 'users', user.uid, 'records', id);
       await deleteDoc(recordRef);
