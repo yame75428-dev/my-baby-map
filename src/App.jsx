@@ -11,10 +11,7 @@ import {
 // --- 配置與初始化診斷 ---
 const getTargetConfig = () => {
   try {
-    // 1. 優先嘗試 Canvas 預覽環境變數
     if (typeof __firebase_config !== 'undefined') return __firebase_config;
-    
-    // 2. 嘗試 Vite/Vercel 環境變數 (必須以 VITE_ 開頭)
     if (import.meta.env && import.meta.env.VITE_FIREBASE_CONFIG) {
       return import.meta.env.VITE_FIREBASE_CONFIG;
     }
@@ -30,12 +27,28 @@ let configError = null;
 
 if (rawConfig) {
   try {
-    firebaseConfig = typeof rawConfig === 'string' ? JSON.parse(rawConfig) : rawConfig;
+    let processed = typeof rawConfig === 'string' ? rawConfig.trim() : JSON.stringify(rawConfig);
+    
+    // 自動修正：如果包含 const 或變數宣告，只擷取大括號部分
+    if (processed.includes('{')) {
+      processed = processed.substring(processed.indexOf('{'), processed.lastIndexOf('}') + 1);
+    }
+    
+    // 自動修正：將非標準 JSON (JS Object) 轉換為標準 JSON
+    // 1. 幫沒有雙引號的 Key 加上雙引號
+    // 2. 將單引號替換為雙引號
+    // 3. 移除結尾多餘的逗號
+    const jsonReady = processed
+      .replace(/([{,])\s*([a-zA-Z0-9]+)\s*:/g, '$1"$2":') 
+      .replace(/'/g, '"')
+      .replace(/,\s*([\]}])/g, '$1');
+
+    firebaseConfig = JSON.parse(jsonReady);
   } catch (e) {
-    configError = "配置格式錯誤：請確保 Vercel 的 Value 內容只有大括號 {...}，不包含 const 或分號。";
+    configError = "配置格式不正確。建議檢查 Vercel 設定：\n1. 確保只貼上從 { 開始到 } 結束的內容。\n2. 確保 Value 欄位中沒有包含 'const' 或 ';' 分號。";
   }
 } else {
-  configError = "找不到配置：請確認 Vercel 設定中 Key 是否為 VITE_FIREBASE_CONFIG";
+  configError = "找不到配置。請確認 Vercel 設定中 Key 名稱是否為：VITE_FIREBASE_CONFIG";
 }
 
 // 初始化 Firebase 實體
@@ -216,7 +229,7 @@ const App = () => {
       <div className="h-screen flex flex-col items-center justify-center p-8 text-center bg-slate-50">
         <AlertCircle size={48} className="text-red-500 mb-4" />
         <h1 className="text-xl font-bold text-slate-800 mb-2">啟動障礙診斷</h1>
-        <p className="text-sm text-slate-500 mb-6 leading-relaxed bg-white p-4 rounded-xl border">{configError}</p>
+        <p className="text-sm text-slate-500 mb-6 leading-relaxed bg-white p-4 rounded-xl border whitespace-pre-line">{configError}</p>
         <button onClick={() => window.location.reload()} className="px-6 py-2 bg-blue-600 text-white rounded-full font-bold flex items-center gap-2 active:scale-95 transition-all">
           <RefreshCw size={18} /> 重新嘗試
         </button>
