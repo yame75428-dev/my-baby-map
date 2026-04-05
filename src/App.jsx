@@ -5,7 +5,7 @@ import { getFirestore, collection, addDoc, deleteDoc, updateDoc, doc, onSnapshot
 import { 
   Camera, Calendar, MapPin, Plus, Trash2, History, ChevronRight, X, 
   Image as ImageIcon, Map as MapIcon, BarChart3, List, ChevronLeft, 
-  Search, Loader2, Navigation, Sparkles, Wand2, Cloud, CloudOff, AlertCircle, RefreshCw, Bug, CheckCircle2, Edit3, Flame, Baby, Settings as SettingsIcon, LogOut, Key, ShieldCheck
+  Search, Loader2, Navigation, Sparkles, Wand2, Cloud, CloudOff, AlertCircle, RefreshCw, Bug, CheckCircle2, Edit3, Flame, Baby, Settings as SettingsIcon, LogOut, Key, ShieldCheck, Globe
 } from 'lucide-react';
 
 // --- Firebase 配置 ---
@@ -21,7 +21,7 @@ const MY_FIREBASE_CONFIG = {
 
 const appId = 'baby-growth-map';
 
-// --- 台灣行政區資料 ---
+// --- 台灣行政區資料庫 ---
 const TAIWAN_DATA = {
   "台北市": { center: [25.0330, 121.5654], districts: ["中正區", "大同區", "中山區", "松山區", "大安區", "萬華區", "信義區", "士林區", "北投區", "內湖區", "南港區", "文山區"] },
   "新北市": { center: [25.0125, 121.4657], districts: ["板橋區", "三重區", "中和區", "永和區", "新莊區", "新店區", "樹林區", "鶯歌區", "三峽區", "淡水區", "汐止區", "瑞芳區", "土城區", "蘆洲區", "五股區", "泰山區", "林口區", "深坑區", "石碇區", "坪林區", "三芝區", "石門區", "八里區", "平溪區", "雙溪區", "貢寮區", "金山區", "萬里區", "烏來區"] },
@@ -42,10 +42,12 @@ const TAIWAN_DATA = {
   "宜蘭縣": { center: [24.7021, 121.7377], districts: ["宜蘭市", "羅東鎮", "蘇澳鎮", "頭城鎮", "礁溪鄉", "壯圍鄉", "員山鄉", "冬山鄉", "五結鄉", "三星鄉", "大同鄉", "南澳鄉"] },
   "花蓮縣": { center: [23.9872, 121.6016], districts: ["花蓮市", "鳳林鎮", "玉里鎮", "新城鄉", "吉安鄉", "壽豐鄉", "光復鄉", "豐濱鄉", "瑞穗鄉", "富里鄉", "秀林鄉", "萬榮鄉", "卓溪鄉"] },
   "台東縣": { center: [22.7583, 121.1444], districts: ["台東市", "成功鎮", "關山鎮", "卑南鄉", "大武鄉", "太麻里鄉", "東河鄉", "長濱鄉", "鹿野鄉", "池上鄉", "綠島鄉", "延平鄉", "海端鄉", "達仁鄉", "金峰鄉", "蘭嶼鄉"] },
-  "澎湖縣": { center: [23.5711, 119.5793], districts: ["馬公市", "湖西鄉", "白沙鄉", "西嶼鄉", "望安鄉", "七美鄉"] }
+  "澎湖縣": { center: [23.5711, 119.5793], districts: ["馬公市", "湖西鄉", "白沙鄉", "西嶼鄉", "望安鄉", "七美鄉"] },
+  "其他(國外)": { center: [23.6, 121.0], districts: ["國外地區"] }
 };
 
 const App = () => {
+  // --- 狀態定義 ---
   const [user, setUser] = useState(null);
   const [db, setDb] = useState(null);
   const [familyCode, setFamilyCode] = useState('');
@@ -55,13 +57,15 @@ const App = () => {
   const [isAdding, setIsAdding] = useState(false);
   const [isEditing, setIsEditing] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
-  const [isCompressing, setIsCompressing] = useState(false); // 新增壓縮狀態
+  const [isCompressing, setIsCompressing] = useState(false);
   const [isDeleting, setIsDeleting] = useState(false);
   const [selectedRecord, setSelectedRecord] = useState(null);
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
   const [errorMsg, setErrorMsg] = useState('');
   const [babyBirthday, setBabyBirthday] = useState('');
   const [isSettingBirthday, setIsSettingBirthday] = useState(false);
+  const [searchKeyword, setSearchKeyword] = useState('');
+  const [isSearching, setIsSearching] = useState(false);
 
   const [formData, setFormData] = useState({
     date: new Date().toISOString().split('T')[0],
@@ -71,128 +75,12 @@ const App = () => {
 
   const mapInstance = useRef(null);
   const markersGroup = useRef(null);
+  const editingMarker = useRef(null);
 
-  // --- 圖片壓縮邏輯 ---
-  const compressImage = (file) => {
-    return new Promise((resolve, reject) => {
-      const reader = new FileReader();
-      reader.readAsDataURL(file);
-      reader.onload = (event) => {
-        const img = new Image();
-        img.src = event.target.result;
-        img.onload = () => {
-          const canvas = document.createElement('canvas');
-          let width = img.width;
-          let height = img.height;
-          
-          // 最大邊長限制在 800px 以確保檔案小於 1MB
-          const MAX_SIZE = 800;
-          if (width > height) {
-            if (width > MAX_SIZE) {
-              height *= MAX_SIZE / width;
-              width = MAX_SIZE;
-            }
-          } else {
-            if (height > MAX_SIZE) {
-              width *= MAX_SIZE / height;
-              height = MAX_SIZE;
-            }
-          }
-          
-          canvas.width = width;
-          canvas.height = height;
-          const ctx = canvas.getContext('2d');
-          ctx.drawImage(img, 0, 0, width, height);
-          
-          // 使用 JPEG 格式並設定 0.6 品質
-          const compressedBase64 = canvas.toDataURL('image/jpeg', 0.6);
-          resolve(compressedBase64);
-        };
-        img.onerror = (err) => reject(err);
-      };
-      reader.onerror = (err) => reject(err);
-    });
-  };
-
-  const handleFileChange = async (e) => {
-    const file = e.target.files[0];
-    if (file) {
-      setIsCompressing(true);
-      setErrorMsg('');
-      try {
-        const compressedData = await compressImage(file);
-        setFormData(prev => ({ ...prev, photo: compressedData }));
-      } catch (err) {
-        setErrorMsg("圖片壓縮失敗，請換一張試試");
-      } finally {
-        setIsCompressing(false);
-      }
-    }
-  };
-
-  // --- 計算年齡 (強化版) ---
-  const getAgeAtDate = (birthdayStr, targetDateInput) => {
-    if (!birthdayStr || !targetDateInput) return "";
-    const birth = new Date(birthdayStr);
-    const target = new Date(targetDateInput);
-    if (isNaN(birth.getTime()) || isNaN(target.getTime())) return "";
-    
-    if (target < birth) return "出生前";
-    let years = target.getFullYear() - birth.getFullYear();
-    let months = target.getMonth() - birth.getMonth();
-    if (months < 0 || (months === 0 && target.getDate() < birth.getDate())) {
-      years--; months += 12;
-    }
-    if (target.getDate() < birth.getDate()) months--;
-    if (years === 0) return `${months}個月`;
-    return `${years}歲${months}個月`;
-  };
-
-  const countyStats = useMemo(() => {
-    const stats = {};
-    records.forEach(r => { stats[r.county] = (stats[r.county] || 0) + 1; });
-    return Object.entries(stats).sort((a, b) => b[1] - a[1]);
-  }, [records]);
-
-  // --- 初始化 Firebase ---
-  useEffect(() => {
-    try {
-      const firebaseApp = getApps().length > 0 ? getApp() : initializeApp(MY_FIREBASE_CONFIG);
-      const auth = getAuth(firebaseApp);
-      const firestore = getFirestore(firebaseApp);
-      setDb(firestore);
-
-      const unsubscribe = onAuthStateChanged(auth, (u) => {
-        if (u) { setUser(u); }
-        else { signInAnonymously(auth).catch(e => setErrorMsg("匿名登入失敗")); }
-      });
-      return () => unsubscribe();
-    } catch (err) { setErrorMsg("初始化異常：" + String(err.message)); }
-  }, []);
-
-  // --- 監聽資料 ---
-  useEffect(() => {
-    if (!user || !db || !isCodeAuthorized) return;
-    
-    const recordsCol = collection(db, 'artifacts', appId, 'public', 'data', `family_records_${familyCode}`);
-    const unsubRecords = onSnapshot(recordsCol, (snap) => {
-      const data = snap.docs.map(doc => ({ ...doc.data(), id: doc.id }));
-      data.sort((a, b) => new Date(b.date) - new Date(a.date));
-      setRecords(data);
-    }, (err) => {
-      if (err.code === 'permission-denied') setErrorMsg("權限不足，請檢查 Firebase Rules");
-    });
-
-    const settingsDoc = doc(db, 'artifacts', appId, 'public', 'data', 'family_configs', familyCode);
-    getDoc(settingsDoc).then(s => {
-      if (s.exists()) setBabyBirthday(s.data().birthday || '');
-    });
-
-    return () => unsubRecords();
-  }, [user, db, isCodeAuthorized, familyCode]);
+  // --- 函式定義 (移到上方以解決 ReferenceError) ---
 
   const handleAuthCode = (e) => {
-    e.preventDefault();
+    if (e) e.preventDefault();
     if (familyCode.trim().length < 4) {
       setErrorMsg("暗號至少需要 4 個字元喔！");
       return;
@@ -208,11 +96,200 @@ const App = () => {
     setBabyBirthday('');
   };
 
-  // --- 地圖初始化 ---
+  const updateEditingMarker = (coords) => {
+    if (window.L && mapInstance.current) {
+      if (editingMarker.current) editingMarker.current.remove();
+      editingMarker.current = window.L.marker(coords, { 
+        icon: window.L.divIcon({ 
+          className: 'temp-marker', 
+          html: `<div class="w-8 h-8 bg-red-500 rounded-full border-4 border-white shadow-lg animate-pulse flex items-center justify-center text-white"><MapPin size={16}/></div>`,
+          iconSize: [32, 32], iconAnchor: [16, 16]
+        }) 
+      }).addTo(mapInstance.current);
+    }
+  };
+
+  const compressImage = (file) => {
+    return new Promise((resolve) => {
+      const reader = new FileReader();
+      reader.readAsDataURL(file);
+      reader.onload = (event) => {
+        const img = new Image();
+        img.src = event.target.result;
+        img.onload = () => {
+          const canvas = document.createElement('canvas');
+          let width = img.width, height = img.height;
+          const MAX_SIZE = 800;
+          if (width > height) { if (width > MAX_SIZE) { height *= MAX_SIZE / width; width = MAX_SIZE; } }
+          else { if (height > MAX_SIZE) { width *= MAX_SIZE / height; height = MAX_SIZE; } }
+          canvas.width = width; canvas.height = height;
+          const ctx = canvas.getContext('2d');
+          ctx.drawImage(img, 0, 0, width, height);
+          resolve(canvas.toDataURL('image/jpeg', 0.6));
+        };
+      };
+    });
+  };
+
+  const handleFileChange = async (e) => {
+    const file = e.target.files[0];
+    if (file) {
+      setIsCompressing(true);
+      setErrorMsg('');
+      try {
+        const compressedData = await compressImage(file);
+        setFormData(prev => ({ ...prev, photo: compressedData }));
+      } catch (err) { setErrorMsg("圖片處理失敗：" + err.message); }
+      finally { setIsCompressing(false); }
+    }
+  };
+
+  const getAgeAtDate = (birthdayStr, targetDateInput) => {
+    if (!birthdayStr || !targetDateInput) return "";
+    const birth = new Date(birthdayStr), target = new Date(targetDateInput);
+    if (isNaN(birth.getTime()) || isNaN(target.getTime())) return "";
+    if (target < birth) return "出生前";
+    let years = target.getFullYear() - birth.getFullYear(), months = target.getMonth() - birth.getMonth();
+    if (months < 0 || (months === 0 && target.getDate() < birth.getDate())) { years--; months += 12; }
+    if (target.getDate() < birth.getDate()) months--;
+    return years === 0 ? `${months}個月` : `${years}歲${months}個月`;
+  };
+
+  const fetchCoordsForArea = async (county, district) => {
+    try {
+      const queryStr = `${county}${district}`;
+      const resp = await fetch(`https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(queryStr)}`);
+      const data = await resp.json();
+      if (data && data.length > 0) return [parseFloat(data[0].lat), parseFloat(data[0].lon)];
+    } catch (e) { console.error("定位服務連線失敗"); }
+    return null;
+  };
+
+  const handleKeywordSearch = async () => {
+    if (!searchKeyword.trim()) return;
+    setIsSearching(true);
+    try {
+      const resp = await fetch(`https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(searchKeyword)}`);
+      const data = await resp.json();
+      if (data && data.length > 0) {
+        const newCoords = [parseFloat(data[0].lat), parseFloat(data[0].lon)];
+        setFormData(prev => ({ ...prev, coords: newCoords, locationName: searchKeyword }));
+        if (mapInstance.current) { mapInstance.current.flyTo(newCoords, 16); updateEditingMarker(newCoords); }
+      } else { setErrorMsg("找不到地點，請換個詞試試"); }
+    } catch (err) { setErrorMsg("搜尋服務暫時不可用"); }
+    finally { setIsSearching(false); }
+  };
+
+  const handleGetLocation = () => {
+    if (!navigator.geolocation) return setErrorMsg("設備不支援定位");
+    setIsSearching(true);
+    navigator.geolocation.getCurrentPosition(
+      (pos) => {
+        const newCoords = [pos.coords.latitude, pos.coords.longitude];
+        setFormData(prev => ({ ...prev, coords: newCoords }));
+        if (mapInstance.current) { mapInstance.current.flyTo(newCoords, 17); updateEditingMarker(newCoords); }
+        setIsSearching(false);
+      },
+      () => { setErrorMsg("請開啟 GPS 權限"); setIsSearching(false); }
+    );
+  };
+
+  const handleCountyChange = (val) => {
+    const coords = TAIWAN_DATA[val].center;
+    const firstDistrict = TAIWAN_DATA[val].districts[0];
+    setFormData(prev => ({ ...prev, county: val, district: firstDistrict, coords }));
+    if (mapInstance.current) {
+      const zoom = val === "其他(國外)" ? 7 : 12;
+      mapInstance.current.flyTo(coords, zoom);
+      updateEditingMarker(coords);
+    }
+  };
+
+  const handleDistrictChange = async (val) => {
+    setFormData(prev => ({ ...prev, district: val }));
+    if (formData.county !== "其他(國外)") {
+      setIsSearching(true);
+      const newCoords = await fetchCoordsForArea(formData.county, val);
+      if (newCoords && mapInstance.current) {
+        setFormData(prev => ({ ...prev, coords: newCoords }));
+        mapInstance.current.flyTo(newCoords, 15);
+        updateEditingMarker(newCoords);
+      }
+      setIsSearching(false);
+    }
+  };
+
+  const handleSave = async (e) => {
+    e.preventDefault();
+    if (!user || !db || !familyCode) return;
+    setIsSaving(true);
+    try {
+      const colPath = `family_records_${familyCode}`;
+      if (isEditing && selectedRecord) {
+        await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', colPath, selectedRecord.id), formData);
+      } else {
+        await addDoc(collection(db, 'artifacts', appId, 'public', 'data', colPath), formData);
+      }
+      setIsAdding(false); setIsEditing(false);
+      if (editingMarker.current) editingMarker.current.remove();
+      setFormData({ date: new Date().toISOString().split('T')[0], locationName: '', county: '雲林縣', district: '斗六市', note: '', photo: null, coords: TAIWAN_DATA["雲林縣"].center });
+    } catch (err) { setErrorMsg("儲存失敗：" + err.message); } finally { setIsSaving(false); }
+  };
+
+  const saveBirthday = async (date) => {
+    if (!user || !db || !familyCode) return;
+    setBabyBirthday(date);
+    await setDoc(doc(db, 'artifacts', appId, 'public', 'data', 'family_configs', familyCode), { birthday: date });
+    setIsSettingBirthday(false);
+  };
+
+  const handleDelete = async () => {
+    if (!selectedRecord || !user || !db || !familyCode) return;
+    setIsDeleting(true);
+    try {
+      const colPath = `family_records_${familyCode}`;
+      await deleteDoc(doc(db, 'artifacts', appId, 'public', 'data', colPath, selectedRecord.id));
+      setSelectedRecord(null); setShowDeleteConfirm(false);
+    } catch (err) { setErrorMsg("刪除失敗：" + err.message); } finally { setIsDeleting(false); }
+  };
+
+  const countyStats = useMemo(() => {
+    const stats = {};
+    records.forEach(r => { stats[r.county] = (stats[r.county] || 0) + 1; });
+    return Object.entries(stats).sort((a, b) => b[1] - a[1]);
+  }, [records]);
+
+  // --- 副作用 (Side Effects) ---
+
+  useEffect(() => {
+    try {
+      const firebaseApp = getApps().length > 0 ? getApp() : initializeApp(MY_FIREBASE_CONFIG);
+      const auth = getAuth(firebaseApp), firestore = getFirestore(firebaseApp);
+      setDb(firestore);
+      onAuthStateChanged(auth, (u) => {
+        if (u) setUser(u); else signInAnonymously(auth);
+      });
+    } catch (err) { setErrorMsg("連線初始化異常"); }
+  }, []);
+
+  useEffect(() => {
+    if (!user || !db || !isCodeAuthorized) return;
+    const recordsCol = collection(db, 'artifacts', appId, 'public', 'data', `family_records_${familyCode}`);
+    const unsub = onSnapshot(recordsCol, (snap) => {
+      const data = snap.docs.map(doc => ({ ...doc.data(), id: doc.id }));
+      data.sort((a, b) => new Date(b.date) - new Date(a.date));
+      setRecords(data);
+    }, (err) => setErrorMsg("資料庫連線失敗：" + err.message));
+
+    const settingsDoc = doc(db, 'artifacts', appId, 'public', 'data', 'family_configs', familyCode);
+    getDoc(settingsDoc).then(s => { if (s.exists()) setBabyBirthday(s.data().birthday || ''); });
+    return () => unsub();
+  }, [user, db, isCodeAuthorized, familyCode]);
+
   useEffect(() => {
     if (typeof window === 'undefined' || mapInstance.current || !isCodeAuthorized) return;
-    const initMap = () => {
-      const L = window.L; if (!L) return;
+    const init = () => {
+      const L = window.L;
       mapInstance.current = L.map('map-view', { zoomControl: false, tap: true }).setView([23.6, 121.0], 7);
       L.tileLayer('https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png', { attribution: '©OSM' }).addTo(mapInstance.current);
       markersGroup.current = L.layerGroup().addTo(mapInstance.current);
@@ -220,14 +297,15 @@ const App = () => {
         const { lat, lng } = e.latlng;
         setFormData(prev => ({ ...prev, coords: [lat, lng] }));
         setIsAdding(true); setIsEditing(false);
+        updateEditingMarker([lat, lng]);
       });
     };
     if (!window.L) {
       const link = document.createElement('link'); link.rel = 'stylesheet'; link.href = 'https://unpkg.com/leaflet@1.9.4/dist/leaflet.css';
       document.head.appendChild(link);
-      const script = document.createElement('script'); script.src = 'https://unpkg.com/leaflet@1.9.4/dist/leaflet.js'; script.onload = initMap;
+      const script = document.createElement('script'); script.src = 'https://unpkg.com/leaflet@1.9.4/dist/leaflet.js'; script.onload = init;
       document.head.appendChild(script);
-    } else initMap();
+    } else init();
   }, [isCodeAuthorized]);
 
   useEffect(() => {
@@ -246,53 +324,7 @@ const App = () => {
     }
   }, [records, isCodeAuthorized]);
 
-  const handleCountyChange = (val) => {
-    setFormData(prev => ({ ...prev, county: val, district: TAIWAN_DATA[val].districts[0], coords: TAIWAN_DATA[val].center }));
-  };
-
-  const handleSave = async (e) => {
-    e.preventDefault();
-    if (!user || !db || !familyCode) return;
-    setIsSaving(true);
-    setErrorMsg('');
-    try {
-      const colRef = collection(db, 'artifacts', appId, 'public', 'data', `family_records_${familyCode}`);
-      if (isEditing && selectedRecord) {
-        const docRef = doc(db, 'artifacts', appId, 'public', 'data', `family_records_${familyCode}`, selectedRecord.id);
-        await updateDoc(docRef, formData);
-      } else {
-        await addDoc(colRef, formData);
-      }
-      setIsAdding(false); setIsEditing(false);
-      setFormData({ date: new Date().toISOString().split('T')[0], locationName: '', county: '雲林縣', district: '古坑鄉', note: '', photo: null, coords: TAIWAN_DATA["雲林縣"].center });
-    } catch (err) { setErrorMsg("儲存失敗：" + String(err.code)); } finally { setIsSaving(false); }
-  };
-
-  const saveBirthday = async (date) => {
-    if (!user || !db || !familyCode) return;
-    setBabyBirthday(date);
-    await setDoc(doc(db, 'artifacts', appId, 'public', 'data', 'family_configs', familyCode), { birthday: date });
-    setIsSettingBirthday(false);
-  };
-
-  const handleDelete = async () => {
-    if (!selectedRecord || !user || !db || !familyCode) return;
-    setIsDeleting(true);
-    try {
-      const docRef = doc(db, 'artifacts', appId, 'public', 'data', `family_records_${familyCode}`, selectedRecord.id);
-      await deleteDoc(docRef); setSelectedRecord(null); setShowDeleteConfirm(false);
-    } catch (err) { setErrorMsg("刪除失敗"); } finally { setIsDeleting(false); }
-  };
-
-  const handleStartEdit = () => {
-    if (!selectedRecord) return;
-    setFormData({
-      date: selectedRecord.date, locationName: selectedRecord.locationName, county: selectedRecord.county,
-      district: selectedRecord.district || TAIWAN_DATA[selectedRecord.county].districts[0],
-      note: selectedRecord.note || '', photo: selectedRecord.photo || null, coords: selectedRecord.coords
-    });
-    setIsEditing(true); setIsAdding(true);
-  };
+  // --- 子組件 ---
 
   const TimelineList = () => (
     <div className="flex flex-col h-full bg-slate-50 overflow-y-auto p-4 space-y-5 pb-24">
@@ -306,22 +338,15 @@ const App = () => {
         ) : (
           <div className="flex justify-between items-end">
             <div><p className="text-[11px] opacity-70">生日</p><p className="text-xl font-black">{babyBirthday || '未設定'}</p></div>
-            <div className="text-right">
-              <p className="text-[11px] opacity-70">目前</p>
-              <p className="text-sm font-bold bg-white/20 px-2 py-1 rounded-lg">
-                {getAgeAtDate(babyBirthday, new Date().toISOString()) || '--'}
-              </p>
-            </div>
+            <div className="text-right"><p className="text-[11px] opacity-70">目前</p><p className="text-sm font-bold bg-white/20 px-2 py-1 rounded-lg">{getAgeAtDate(babyBirthday, new Date().toISOString()) || '--'}</p></div>
           </div>
         )}
       </section>
 
       <section>
-        <div className="flex justify-between items-center mb-3">
-          <h2 className="text-xs font-black text-slate-400 uppercase flex items-center gap-2"><Flame size={14} className="text-orange-500" /> 縣市熱力</h2>
-          <button onClick={handleLogout} className="text-[10px] text-slate-400 font-bold flex items-center gap-1 hover:text-red-500 transition-colors">
-            <LogOut size={12} /> 登出暗號
-          </button>
+        <div className="flex justify-between items-center mb-3 text-slate-400 font-bold">
+          <h2 className="text-xs uppercase flex items-center gap-2"><Flame size={14} className="text-orange-500" /> 縣市熱力</h2>
+          <button onClick={handleLogout} className="text-[10px] flex items-center gap-1 hover:text-red-500"><LogOut size={12}/> 登出</button>
         </div>
         <div className="flex flex-wrap gap-2">
           {countyStats.map(([name, count]) => (
@@ -341,44 +366,33 @@ const App = () => {
             <ChevronRight size={14} className="self-center text-slate-300" />
           </div>
         ))}
-        {records.length === 0 && <div className="py-20 text-center text-slate-400 text-xs">尚未有紀錄，快點擊「+」新增吧！</div>}
       </section>
     </div>
   );
 
+  // --- 主要渲染邏輯 (將 handleAuthCode 的使用放在定義之後) ---
+
   if (!isCodeAuthorized) {
     return (
-      <div className="h-screen w-full flex flex-col items-center justify-center bg-slate-50 p-8 text-center font-sans">
-        <div className="w-20 h-20 bg-indigo-600 rounded-[2.2rem] flex items-center justify-center text-white shadow-2xl shadow-indigo-200 mb-8 animate-in zoom-in duration-500">
-          <ShieldCheck size={40} />
-        </div>
-        <h1 className="text-3xl font-black text-slate-900 mb-3">家庭同步空間</h1>
-        <p className="text-slate-500 mb-10 max-w-[280px] font-medium leading-relaxed text-sm">
-          輸入「家庭專屬暗號」即可開啟您的地圖。<br/>暗號相同即可跨裝置同步回憶。
-        </p>
+      <div className="h-screen w-full flex flex-col items-center justify-center bg-slate-50 p-8 text-center font-sans text-slate-800">
+        <div className="w-20 h-20 bg-indigo-600 rounded-[2.2rem] flex items-center justify-center text-white shadow-2xl shadow-indigo-200 mb-8 animate-in zoom-in duration-500"><ShieldCheck size={40} /></div>
+        <h1 className="text-3xl font-black mb-3">家庭回憶空間</h1>
+        <p className="text-slate-500 mb-10 max-w-[280px] font-medium leading-relaxed text-sm">輸入暗號即可跨裝置同步。<br/>暗號相同，回憶就相同。</p>
         <form onSubmit={handleAuthCode} className="w-full max-w-xs space-y-4">
           <div className="relative">
             <Key className="absolute left-4 top-4 text-slate-400" size={20} />
             <input 
               type="text" 
-              required
-              placeholder="請輸入家庭專屬暗號"
-              className="w-full pl-12 pr-4 py-4 bg-white border border-slate-200 rounded-2xl font-bold text-slate-700 shadow-xl shadow-slate-100 outline-none focus:ring-2 focus:ring-indigo-500 transition-all"
-              value={familyCode}
+              required 
+              placeholder="請輸入專屬暗號" 
+              className="w-full pl-12 pr-4 py-4 bg-white border border-slate-200 rounded-2xl font-bold shadow-xl outline-none focus:ring-2 focus:ring-indigo-500" 
+              value={familyCode} 
               onChange={(e) => setFamilyCode(e.target.value.toLowerCase())}
             />
           </div>
-          <button 
-            type="submit"
-            className="w-full py-4 bg-indigo-600 text-white font-black rounded-2xl shadow-xl shadow-indigo-100 active:scale-95 transition-all flex items-center justify-center gap-2"
-          >
-            開啟回憶空間
-          </button>
+          <button type="submit" className="w-full py-4 bg-indigo-600 text-white font-black rounded-2xl shadow-xl active:scale-95 transition-all">進入地圖</button>
         </form>
-        {errorMsg && <p className="mt-4 text-xs font-bold text-red-500">{errorMsg}</p>}
-        <p className="mt-12 text-[10px] text-slate-400 font-bold uppercase tracking-widest leading-loose">
-          無需註冊 · 無需登入 · 僅憑暗號連線<br/>Secure Sync via Firestore
-        </p>
+        {errorMsg && <p className="mt-4 text-xs font-bold text-red-500">{String(errorMsg)}</p>}
       </div>
     );
   }
@@ -386,19 +400,10 @@ const App = () => {
   return (
     <div className="flex flex-col h-screen bg-slate-50 text-slate-800 select-none overflow-hidden font-sans">
       <header className="bg-white px-4 py-3 flex justify-between items-center shadow-sm z-30 shrink-0">
+        <div className="flex items-center gap-2"><div className="bg-indigo-600 p-1.5 rounded-lg text-white shadow-md"><MapIcon size={18} /></div><h1 className="text-lg font-black tracking-tight">成長足跡</h1></div>
         <div className="flex items-center gap-2">
-          <div className="bg-indigo-600 p-1.5 rounded-lg text-white">
-            <MapIcon size={18} />
-          </div>
-          <h1 className="text-lg font-black tracking-tight">成長足跡</h1>
-        </div>
-        <div className="flex items-center gap-2">
-          <div className="px-2 py-1 bg-indigo-50 text-indigo-600 rounded-full text-[9px] font-black uppercase flex items-center gap-1">
-            <ShieldCheck size={10} /> {familyCode}
-          </div>
-          <div className={`flex items-center gap-1 text-[10px] font-bold px-2 py-1 rounded-full ${user ? 'text-green-500' : 'text-slate-400'}`}>
-            {user ? <CheckCircle2 size={12} /> : <CloudOff size={12} />}
-          </div>
+          <div className="px-2 py-1 bg-indigo-50 text-indigo-600 rounded-full text-[9px] font-black uppercase flex items-center gap-1"><ShieldCheck size={10} /> {familyCode}</div>
+          <div className={`flex items-center gap-1 text-[10px] font-bold px-2 py-1 rounded-full ${user ? 'text-green-500' : 'text-slate-400'}`}>{user ? <CheckCircle2 size={12} /> : <CloudOff size={12} />}</div>
         </div>
       </header>
 
@@ -409,9 +414,9 @@ const App = () => {
           {activeTab === 'timeline' && <div className="md:hidden absolute inset-0 bg-slate-50 z-20"><TimelineList /></div>}
           
           {errorMsg && (
-            <div className="absolute top-4 left-4 right-4 z-[2000] bg-red-600 text-white p-3 rounded-xl shadow-xl flex items-center justify-between">
+            <div className="absolute top-4 left-4 right-4 z-[2000] bg-red-600 text-white p-3 rounded-xl shadow-xl flex items-center justify-between animate-in slide-in-from-top">
               <div className="flex items-center gap-2 text-xs font-bold"><AlertCircle size={16} /> {String(errorMsg)}</div>
-              <button onClick={() => setErrorMsg('')} className="p-1">✕</button>
+              <button onClick={() => setErrorMsg('')}>✕</button>
             </div>
           )}
 
@@ -428,8 +433,8 @@ const App = () => {
                     {selectedRecord.photo && <img src={selectedRecord.photo} className="w-full rounded-2xl mb-4 max-h-64 object-cover border" alt="紀錄照片" />}
                     <div className="bg-slate-50 p-4 rounded-xl text-slate-600 text-sm italic mb-6">{selectedRecord.note || "一段美好的足跡。"}</div>
                     <div className="flex gap-3">
-                      <button onClick={handleStartEdit} className="flex-1 py-4 text-blue-600 font-bold text-sm bg-blue-50 rounded-2xl active:scale-95 transition-transform flex items-center justify-center gap-2"><Edit3 size={16} /> 修改</button>
-                      <button onClick={() => setShowDeleteConfirm(true)} className="flex-1 py-4 text-red-500 font-bold text-sm bg-red-50 rounded-2xl active:scale-95 transition-transform flex items-center justify-center gap-2"><Trash2 size={16} /> 刪除</button>
+                      <button onClick={() => { setFormData(selectedRecord); setIsEditing(true); setIsAdding(true); updateEditingMarker(selectedRecord.coords); }} className="flex-1 py-4 text-indigo-600 font-bold text-sm bg-indigo-50 rounded-2xl active:scale-95 flex items-center justify-center gap-2"><Edit3 size={16} /> 修改</button>
+                      <button onClick={() => setShowDeleteConfirm(true)} className="flex-1 py-4 text-red-500 font-bold text-sm bg-red-50 rounded-2xl active:scale-95 flex items-center justify-center gap-2"><Trash2 size={16} /> 刪除</button>
                     </div>
                   </>
                 ) : (
@@ -437,8 +442,8 @@ const App = () => {
                     <Trash2 size={32} className="text-red-500 mx-auto mb-4" />
                     <h3 className="text-xl font-black mb-2">確定刪除嗎？</h3>
                     <div className="flex gap-3 mt-6">
-                      <button onClick={() => setShowDeleteConfirm(false)} className="flex-1 py-4 bg-slate-100 rounded-2xl font-bold text-slate-600">取消</button>
-                      <button onClick={handleDelete} className="flex-1 py-4 bg-red-500 text-white rounded-2xl font-bold">確定</button>
+                      <button onClick={() => setShowDeleteConfirm(false)} className="flex-1 py-4 bg-slate-100 rounded-2xl font-bold">取消</button>
+                      <button onClick={handleDelete} className="flex-1 py-4 bg-red-500 text-white rounded-2xl font-bold">{isDeleting ? "正在刪除..." : "確定"}</button>
                     </div>
                   </div>
                 )}
@@ -446,44 +451,45 @@ const App = () => {
             </div>
           )}
         </div>
+
         {isAdding && (
           <div className="fixed inset-0 bg-white z-[1500] flex flex-col animate-in slide-in-from-bottom duration-300 md:items-center md:justify-center md:bg-black/50">
-            <div className="flex justify-between items-center p-4 border-b bg-white md:rounded-t-3xl md:w-full md:max-w-md">
-              <button onClick={() => { setIsAdding(false); setIsEditing(false); }} className="p-1"><X /></button>
-              <h2 className="font-black">{isEditing ? '修改紀錄' : '紀錄新足跡'}</h2><div className="w-10"></div>
+            <div className="flex justify-between items-center p-4 border-b bg-white md:rounded-t-3xl md:w-full md:max-w-md shadow-sm">
+              <button onClick={() => { setIsAdding(false); setIsEditing(false); if(editingMarker.current) editingMarker.current.remove(); }} className="p-1"><X /></button>
+              <h2 className="font-black">{isEditing ? '修改這段回憶' : '紀錄新回憶'}</h2><div className="w-10"></div>
             </div>
             <form onSubmit={handleSave} className="flex-1 overflow-y-auto p-6 space-y-5 bg-white md:w-full md:max-w-md md:flex-none">
-              <div className="grid grid-cols-2 gap-4">
-                <div className="space-y-1"><label className="text-[10px] font-black text-slate-400 uppercase">日期</label><input type="date" required value={formData.date} onChange={e => setFormData({...formData, date: e.target.value})} className="w-full bg-slate-50 rounded-xl px-4 py-3 text-sm focus:ring-2 focus:ring-blue-500 outline-none" /></div>
-                <div className="space-y-1"><label className="text-[10px] font-black text-slate-400 uppercase">縣市</label><select value={formData.county} onChange={e => handleCountyChange(e.target.value)} className="w-full bg-slate-50 rounded-xl px-4 py-3 text-sm focus:ring-2 focus:ring-blue-500 outline-none">{Object.keys(TAIWAN_DATA).map(c => <option key={c} value={c}>{c}</option>)}</select></div>
+              
+              <div className="bg-slate-50 p-4 rounded-2xl space-y-3 border border-slate-100">
+                <label className="text-[10px] font-black text-slate-400 uppercase flex items-center gap-1"><Search size={10}/> 關鍵字/GPS 精確找點</label>
+                <div className="flex gap-2">
+                  <div className="relative flex-1">
+                    <input type="text" placeholder="輸入景點名稱..." className="w-full pl-3 pr-10 py-3 bg-white border border-slate-200 rounded-xl text-sm focus:ring-2 focus:ring-indigo-500 outline-none" value={searchKeyword} onChange={(e) => setSearchKeyword(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && (e.preventDefault(), handleKeywordSearch())}/>
+                    <button type="button" onClick={handleKeywordSearch} className="absolute right-2 top-2 p-1.5 text-slate-400 hover:text-indigo-600"><Search size={18}/></button>
+                  </div>
+                  <button type="button" onClick={handleGetLocation} className="p-3 bg-white border border-slate-200 rounded-xl text-slate-500 hover:text-indigo-600 active:bg-indigo-50">{isSearching ? <Loader2 size={18} className="animate-spin"/> : <Navigation size={18}/>}</button>
+                </div>
               </div>
-              <div className="space-y-1"><label className="text-[10px] font-black text-slate-400 uppercase">鄉鎮市區</label><select value={formData.district} onChange={e => setFormData({...formData, district: e.target.value})} className="w-full bg-slate-50 rounded-xl px-4 py-3 text-sm outline-none">{TAIWAN_DATA[formData.county].districts.map(d => <option key={d} value={d}>{d}</option>)}</select></div>
-              <div className="space-y-1"><label className="text-[10px] font-black text-slate-400 uppercase">地點名稱 (必填)</label><input type="text" required placeholder="例如：飛牛牧場" value={formData.locationName} onChange={e => setFormData({...formData, locationName: e.target.value})} className="w-full bg-slate-50 rounded-xl px-4 py-3 text-sm outline-none font-bold" /></div>
+
+              <div className="grid grid-cols-2 gap-4">
+                <div className="space-y-1"><label className="text-[10px] font-black text-slate-400 uppercase">1. 選擇縣市</label><select value={formData.county} onChange={e => handleCountyChange(e.target.value)} className="w-full bg-slate-50 rounded-xl px-4 py-3 text-sm focus:ring-2 focus:ring-indigo-500 outline-none">{Object.keys(TAIWAN_DATA).map(c => <option key={c} value={c}>{c}</option>)}</select></div>
+                <div className="space-y-1"><label className="text-[10px] font-black text-slate-400 uppercase">2. 選擇鄉鎮市</label><select value={formData.district} onChange={e => handleDistrictChange(e.target.value)} className="w-full bg-slate-50 rounded-xl px-4 py-3 text-sm focus:ring-2 focus:ring-indigo-500 outline-none">{TAIWAN_DATA[formData.county].districts.map(d => <option key={d} value={d}>{d}</option>)}</select></div>
+              </div>
+
+              <div className="space-y-1"><label className="text-[10px] font-black text-slate-400 uppercase">日期</label><input type="date" required value={formData.date} onChange={e => setFormData({...formData, date: e.target.value})} className="w-full bg-slate-50 rounded-xl px-4 py-3 text-sm outline-none" /></div>
+              <div className="space-y-1"><label className="text-[10px] font-black text-slate-400 uppercase">景點名稱 (必填)</label><input type="text" required placeholder="例如：飛牛牧場" value={formData.locationName} onChange={e => setFormData({...formData, locationName: e.target.value})} className="w-full bg-slate-50 rounded-xl px-4 py-3 text-sm outline-none font-bold" /></div>
+              
               <div className="space-y-1">
-                <label className="text-[10px] font-black text-slate-400 uppercase flex justify-between items-center">
-                  照片回憶 {isCompressing && <span className="text-blue-500 animate-pulse text-[9px]">壓縮處理中...</span>}
-                </label>
-                <div className={`relative h-40 bg-slate-50 rounded-2xl border-2 border-dashed ${isCompressing ? 'border-blue-300 bg-blue-50/30' : 'border-slate-200'} flex flex-col items-center justify-center overflow-hidden transition-colors`}>
-                  {formData.photo ? (
-                    <img src={formData.photo} className="w-full h-full object-cover" />
-                  ) : (
-                    <>
-                      {isCompressing ? <Loader2 size={24} className="text-blue-500 animate-spin" /> : <Camera size={24} className="text-slate-300"/>}
-                      <span className="text-xs text-slate-400 font-sans">{isCompressing ? '正在最佳化照片' : '上傳照片'}</span>
-                    </>
-                  )}
+                <label className="text-[10px] font-black text-slate-400 uppercase flex justify-between items-center">上傳照片 {isCompressing && <span className="text-blue-500 animate-pulse text-[9px]">壓縮處理中...</span>}</label>
+                <div className="relative h-40 bg-slate-50 rounded-2xl border-2 border-dashed border-slate-200 flex flex-col items-center justify-center overflow-hidden">
+                  {formData.photo ? <img src={formData.photo} className="w-full h-full object-cover" /> : <><Camera size={24} className="text-slate-300"/><span className="text-xs text-slate-400">點擊上傳</span></>}
                   <input type="file" accept="image/*" className="absolute inset-0 opacity-0 cursor-pointer" onChange={handleFileChange} disabled={isCompressing || isSaving} />
                 </div>
-                {formData.photo && !isCompressing && <p className="text-[9px] text-green-500 text-right mt-1 font-bold">✓ 已成功壓縮 (符合雲端規格)</p>}
               </div>
-              <div className="space-y-1"><label className="text-[10px] font-black text-slate-400 uppercase">筆記</label><textarea rows="3" value={formData.note} onChange={e => setFormData({...formData, note: e.target.value})} className="w-full bg-slate-50 rounded-xl px-4 py-3 text-sm outline-none" placeholder="想寫點什麼..." /></div>
-              <button 
-                type="submit" 
-                disabled={isSaving || isCompressing} 
-                className={`w-full py-4 rounded-2xl font-black shadow-lg flex items-center justify-center gap-2 transition-all ${isSaving || isCompressing ? 'bg-slate-300 text-slate-500 cursor-not-allowed' : 'bg-blue-600 text-white active:scale-95'}`}
-              >
+              <div className="space-y-1"><label className="text-[10px] font-black text-slate-400 uppercase">筆記</label><textarea rows="3" value={formData.note} onChange={e => setFormData({...formData, note: e.target.value})} className="w-full bg-slate-50 rounded-xl px-4 py-3 text-sm outline-none" placeholder="記錄當下的感動..." /></div>
+              <button type="submit" disabled={isSaving || isCompressing} className={`w-full py-4 rounded-2xl font-black shadow-lg flex items-center justify-center gap-2 transition-all ${isSaving || isCompressing ? 'bg-slate-300' : 'bg-indigo-600 text-white active:scale-95'}`}>
                 {isSaving ? <Loader2 className="animate-spin" /> : <Cloud size={20} />} 
-                {isCompressing ? '照片處理中...' : (isSaving ? '正在同步...' : (isEditing ? '更新紀錄' : '存入回憶'))}
+                {isCompressing ? '處理照片中...' : (isSaving ? '正在同步雲端...' : (isEditing ? '更新紀錄' : '存入回憶'))}
               </button>
             </form>
           </div>
