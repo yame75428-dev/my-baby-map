@@ -1,14 +1,14 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { initializeApp, getApps, getApp } from 'firebase/app';
 import { getAuth, signInAnonymously, onAuthStateChanged } from 'firebase/auth';
-import { getFirestore, collection, addDoc, deleteDoc, doc, onSnapshot, query } from 'firebase/firestore';
+import { getFirestore, collection, addDoc, deleteDoc, updateDoc, doc, onSnapshot, getDoc, setDoc } from 'firebase/firestore';
 import { 
   Camera, Calendar, MapPin, Plus, Trash2, History, ChevronRight, X, 
   Image as ImageIcon, Map as MapIcon, BarChart3, List, ChevronLeft, 
-  Search, Loader2, Navigation, Sparkles, Wand2, Cloud, CloudOff, AlertCircle, RefreshCw, Bug, CheckCircle2
+  Search, Loader2, Navigation, Sparkles, Wand2, Cloud, CloudOff, AlertCircle, RefreshCw, Bug, CheckCircle2, Edit3, Flame, Baby, Settings as SettingsIcon
 } from 'lucide-react';
 
-// --- 您提供的 Firebase 配置 ---
+// --- Firebase 配置 ---
 const MY_FIREBASE_CONFIG = {
   apiKey: "AIzaSyDCJ7OIam5w_7REdvUFOUCQ6HwMBd6osZs",
   authDomain: "my-baby-map.firebaseapp.com",
@@ -37,12 +37,15 @@ const App = () => {
   const [records, setRecords] = useState([]);
   const [activeTab, setActiveTab] = useState('map');
   const [isAdding, setIsAdding] = useState(false);
+  const [isEditing, setIsEditing] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
   const [isDeleting, setIsDeleting] = useState(false);
   const [selectedRecord, setSelectedRecord] = useState(null);
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
   const [errorMsg, setErrorMsg] = useState('');
-  
+  const [babyBirthday, setBabyBirthday] = useState('');
+  const [isSettingBirthday, setIsSettingBirthday] = useState(false);
+
   const [formData, setFormData] = useState({
     date: new Date().toISOString().split('T')[0],
     locationName: '', county: '雲林縣', district: '古坑鄉',
@@ -51,56 +54,71 @@ const App = () => {
 
   const mapInstance = useRef(null);
   const markersGroup = useRef(null);
-  const heatGroup = useRef(null);
 
-  // --- Firebase 初始化 ---
+  // --- 計算年齡 ---
+  const getAgeAtDate = (birthdayStr, targetDateStr) => {
+    if (!birthdayStr || !targetDateStr) return "";
+    const birth = new Date(birthdayStr);
+    const target = new Date(targetDateStr);
+    if (target < birth) return "出生前";
+    let years = target.getFullYear() - birth.getFullYear();
+    let months = target.getMonth() - birth.getMonth();
+    if (months < 0 || (months === 0 && target.getDate() < birth.getDate())) {
+      years--; months += 12;
+    }
+    if (target.getDate() < birth.getDate()) months--;
+    if (years === 0) return `${months}個月`;
+    return `${years}歲${months}個月`;
+  };
+
+  const countyStats = useMemo(() => {
+    const stats = {};
+    records.forEach(r => { stats[r.county] = (stats[r.county] || 0) + 1; });
+    return Object.entries(stats).sort((a, b) => b[1] - a[1]);
+  }, [records]);
+
+  // --- 初始化 Firebase ---
   useEffect(() => {
-    const initFirebase = async () => {
-      try {
-        const firebaseApp = getApps().length > 0 ? getApp() : initializeApp(MY_FIREBASE_CONFIG);
-        const auth = getAuth(firebaseApp);
-        const firestore = getFirestore(firebaseApp);
-        setDb(firestore);
-
-        onAuthStateChanged(auth, (u) => {
-          if (u) setUser(u);
-          else signInAnonymously(auth).catch(err => setErrorMsg("登入失敗: " + err.message));
-        });
-      } catch (err) {
-        setErrorMsg("Firebase 初始化異常");
-      }
-    };
-    initFirebase();
+    try {
+      const firebaseApp = getApps().length > 0 ? getApp() : initializeApp(MY_FIREBASE_CONFIG);
+      const auth = getAuth(firebaseApp);
+      const firestore = getFirestore(firebaseApp);
+      setDb(firestore);
+      onAuthStateChanged(auth, (u) => {
+        if (u) { setUser(u); setErrorMsg(''); }
+        else signInAnonymously(auth).catch(err => setErrorMsg("雲端連線失敗：" + err.code));
+      });
+    } catch (err) { setErrorMsg("初始化異常：" + err.message); }
   }, []);
 
   // --- 監聽資料 ---
   useEffect(() => {
     if (!user || !db) return;
     const recordsCol = collection(db, 'artifacts', appId, 'users', user.uid, 'records');
-    const unsubscribe = onSnapshot(recordsCol, (snap) => {
+    const unsubRecords = onSnapshot(recordsCol, (snap) => {
       const data = snap.docs.map(doc => ({ ...doc.data(), id: doc.id }));
       data.sort((a, b) => new Date(b.date) - new Date(a.date));
       setRecords(data);
     }, (err) => {
-      if (err.code === 'permission-denied') setErrorMsg("權限不足，請檢查 Firebase Rules 設定");
+      if (err.code === 'permission-denied') setErrorMsg("權限不足，請在 Firebase 檢查 Rules");
     });
-    return () => unsubscribe();
+    const settingsDoc = doc(db, 'artifacts', appId, 'users', user.uid, 'settings', 'profile');
+    getDoc(settingsDoc).then(s => { if (s.exists()) setBabyBirthday(s.data().birthday || ''); });
+    return () => unsubRecords();
   }, [user, db]);
 
   // --- 地圖初始化 ---
   useEffect(() => {
     if (typeof window === 'undefined' || mapInstance.current) return;
     const initMap = () => {
-      const L = window.L;
-      if (!L) return;
+      const L = window.L; if (!L) return;
       mapInstance.current = L.map('map-view', { zoomControl: false, tap: true }).setView([23.6, 121.0], 7);
       L.tileLayer('https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png', { attribution: '©OSM' }).addTo(mapInstance.current);
       markersGroup.current = L.layerGroup().addTo(mapInstance.current);
-      heatGroup.current = L.layerGroup().addTo(mapInstance.current);
       mapInstance.current.on('click', (e) => {
         const { lat, lng } = e.latlng;
         setFormData(prev => ({ ...prev, coords: [lat, lng] }));
-        setIsAdding(true);
+        setIsAdding(true); setIsEditing(false);
       });
     };
     if (!window.L) {
@@ -111,162 +129,180 @@ const App = () => {
     } else initMap();
   }, []);
 
-  // --- 更新標記 ---
   useEffect(() => {
-    if (window.L && mapInstance.current && activeTab === 'map') {
-      const L = window.L;
-      markersGroup.current.clearLayers();
+    if (window.L && mapInstance.current) {
+      const L = window.L; markersGroup.current.clearLayers();
       records.forEach(r => {
         const icon = L.divIcon({
           className: 'custom-icon',
           html: `<div class="w-10 h-10 rounded-full border-2 border-white shadow-lg overflow-hidden bg-blue-600 flex items-center justify-center">
-            ${r.photo ? `<img src="${r.photo}" class="w-full h-full object-cover" />` : `<span class="text-white text-xs">📍</span>`}
+            ${r.photo ? `<img src="${r.photo}" class="w-full h-full object-cover" />` : `<span class="text-white text-[10px] font-bold">📍</span>`}
           </div>`,
           iconSize: [40, 40], iconAnchor: [20, 40]
         });
         L.marker(r.coords, { icon }).addTo(markersGroup.current).on('click', () => setSelectedRecord(r));
       });
     }
-  }, [records, activeTab]);
+  }, [records]);
+
+  const handleCountyChange = (val) => {
+    setFormData(prev => ({ ...prev, county: val, district: TAIWAN_DATA[val].districts[0], coords: TAIWAN_DATA[val].center }));
+  };
 
   const handleSave = async (e) => {
     e.preventDefault();
-    if (!user || !db) return;
-    setIsSaving(true);
-    setErrorMsg('');
+    if (!user || !db) return setErrorMsg("尚未連線，請檢查網路");
+    setIsSaving(true); setErrorMsg('');
     try {
       const colRef = collection(db, 'artifacts', appId, 'users', user.uid, 'records');
-      await addDoc(colRef, formData);
-      setIsAdding(false);
+      if (isEditing && selectedRecord) {
+        const docRef = doc(db, 'artifacts', appId, 'users', user.uid, 'records', selectedRecord.id);
+        await updateDoc(docRef, formData);
+      } else {
+        await addDoc(colRef, formData);
+      }
+      setIsAdding(false); setIsEditing(false);
       setFormData({ date: new Date().toISOString().split('T')[0], locationName: '', county: '雲林縣', district: '古坑鄉', note: '', photo: null, coords: TAIWAN_DATA["雲林縣"].center });
     } catch (err) { 
-      setErrorMsg("儲存失敗：" + err.message); 
-    } finally {
-      setIsSaving(false);
-    }
+      setErrorMsg(`儲存失敗：${err.code || err.message}`); 
+    } finally { setIsSaving(false); }
+  };
+
+  const saveBirthday = async (date) => {
+    if (!user || !db) return; setBabyBirthday(date);
+    await setDoc(doc(db, 'artifacts', appId, 'users', user.uid, 'settings', 'profile'), { birthday: date });
+    setIsSettingBirthday(false);
   };
 
   const handleDelete = async () => {
     if (!selectedRecord || !user || !db) return;
     setIsDeleting(true);
-    setErrorMsg('');
     try {
       const docRef = doc(db, 'artifacts', appId, 'users', user.uid, 'records', selectedRecord.id);
-      await deleteDoc(docRef);
-      setSelectedRecord(null);
-      setShowDeleteConfirm(false);
-    } catch (err) {
-      setErrorMsg("刪除失敗：" + err.message);
-    } finally {
-      setIsDeleting(false);
-    }
+      await deleteDoc(docRef); setSelectedRecord(null); setShowDeleteConfirm(false);
+    } catch (err) { setErrorMsg("刪除失敗：" + err.code); } finally { setIsDeleting(false); }
   };
+
+  const handleStartEdit = () => {
+    if (!selectedRecord) return;
+    setFormData({
+      date: selectedRecord.date, locationName: selectedRecord.locationName, county: selectedRecord.county,
+      district: selectedRecord.district || TAIWAN_DATA[selectedRecord.county].districts[0],
+      note: selectedRecord.note || '', photo: selectedRecord.photo || null, coords: selectedRecord.coords
+    });
+    setIsEditing(true); setIsAdding(true);
+  };
+
+  const TimelineList = () => (
+    <div className="flex flex-col h-full bg-slate-50 overflow-y-auto p-4 space-y-5 pb-24">
+      <section className="bg-gradient-to-br from-blue-600 to-blue-700 rounded-3xl p-5 text-white shadow-lg relative overflow-hidden">
+        <div className="relative z-10 flex justify-between items-start mb-3">
+          <div className="flex items-center gap-2"><Baby size={20} /><h2 className="font-black text-lg">成長設定</h2></div>
+          <button onClick={() => setIsSettingBirthday(!isSettingBirthday)} className="p-2 rounded-full bg-white/10"><SettingsIcon size={16} /></button>
+        </div>
+        {isSettingBirthday ? (
+          <input type="date" className="w-full bg-white/20 border border-white/30 rounded-xl px-4 py-2 text-sm outline-none" value={babyBirthday} onChange={(e) => saveBirthday(e.target.value)} />
+        ) : (
+          <div className="flex justify-between items-end">
+            <div><p className="text-[11px] opacity-70">生日</p><p className="text-xl font-black">{babyBirthday || '未設定'}</p></div>
+            <div className="text-right"><p className="text-[11px] opacity-70">目前</p><p className="text-sm font-bold bg-white/20 px-2 py-1 rounded-lg">{getAgeAtDate(babyBirthday, new Date()) || '--'}</p></div>
+          </div>
+        )}
+      </section>
+      <section>
+        <h2 className="text-xs font-black text-slate-400 uppercase mb-3 flex items-center gap-2"><Flame size={14} className="text-orange-500" /> 縣市足跡</h2>
+        <div className="flex flex-wrap gap-2">
+          {countyStats.map(([name, count]) => (
+            <div key={name} className={`px-3 py-1.5 rounded-xl text-[10px] font-bold shadow-sm ${count > 3 ? 'bg-blue-600 text-white' : 'bg-white text-slate-600 border'}`}>{name} <span>{count}</span></div>
+          ))}
+        </div>
+      </section>
+      <section className="space-y-3">
+        {records.map(r => (
+          <div key={r.id} className="bg-white rounded-2xl border p-3 flex gap-3 cursor-pointer shadow-sm active:bg-slate-50 transition-all" onClick={() => { setSelectedRecord(r); if(window.innerWidth < 768) setActiveTab('map'); if(mapInstance.current) mapInstance.current.flyTo(r.coords, 14); }}>
+            <div className="w-16 h-16 bg-slate-100 rounded-xl overflow-hidden shrink-0">{r.photo ? <img src={r.photo} className="w-full h-full object-cover" /> : <ImageIcon size={20} className="m-auto mt-5 text-slate-300"/>}</div>
+            <div className="flex-1 min-w-0 flex flex-col justify-center">
+              <div className="flex items-center gap-2"><h3 className="font-bold text-slate-800 truncate text-sm">{r.locationName}</h3><span className="text-[9px] text-blue-500 font-black">{getAgeAtDate(babyBirthday, r.date)}</span></div>
+              <p className="text-[10px] text-slate-400 mt-0.5">{r.date} · {r.county}</p>
+            </div>
+            <ChevronRight size={14} className="self-center text-slate-300" />
+          </div>
+        ))}
+      </section>
+    </div>
+  );
 
   return (
     <div className="flex flex-col h-screen bg-slate-50 text-slate-800 select-none overflow-hidden font-sans">
-      <header className="bg-white px-4 py-3 flex justify-between items-center shadow-sm z-10 shrink-0">
-        <h1 className="text-lg font-black text-blue-600 flex items-center gap-2"><MapIcon size={20} /> 成長地圖</h1>
-        <div className={`flex items-center gap-1 text-[10px] font-bold px-2 py-1 rounded-full uppercase ${user ? 'text-green-500 bg-green-50' : 'text-slate-400 bg-slate-100 animate-pulse'}`}>
-          {user ? <CheckCircle2 size={12} /> : <Cloud size={12} />} {user ? '已連線' : '連線中'}
-        </div>
+      <header className="bg-white px-4 py-3 flex justify-between items-center shadow-sm z-30 shrink-0">
+        <div className="flex items-center gap-2"><div className="bg-blue-600 p-1.5 rounded-lg text-white"><MapIcon size={18} /></div><h1 className="text-lg font-black tracking-tight">成長足跡</h1></div>
+        <div className={`flex items-center gap-1 text-[10px] font-bold px-2 py-1 rounded-full ${user ? 'text-green-500 bg-green-50' : 'text-slate-400 animate-pulse'}`}>{user ? <CheckCircle2 size={12} /> : <Cloud size={12} />} {user ? '已連線' : '連線中'}</div>
       </header>
-
-      <main className="flex-1 relative overflow-hidden">
-        <div id="map-view" className="w-full h-full" style={{ visibility: activeTab === 'map' ? 'visible' : 'hidden', position: 'absolute', inset: 0, zIndex: 1 }}></div>
-        
-        {/* 錯誤提示 */}
-        {errorMsg && (
-          <div className="absolute top-4 left-4 right-4 z-[2000] bg-red-500 text-white p-3 rounded-xl shadow-xl flex items-center justify-between">
-            <div className="flex items-center gap-2 text-xs font-bold"><AlertCircle size={16} /> {errorMsg}</div>
-            <button onClick={() => setErrorMsg('')}><X size={16} /></button>
-          </div>
-        )}
-
-        {/* 詳情與刪除 */}
-        {selectedRecord && (
-          <div className="fixed inset-0 bg-black/40 z-[1000] flex items-end">
-            <div className="w-full bg-white rounded-t-[2.5rem] p-6 animate-in slide-in-from-bottom duration-300 shadow-2xl max-h-[85vh] overflow-y-auto">
-              <div className="w-12 h-1.5 bg-slate-200 rounded-full mx-auto mb-6" onClick={() => setSelectedRecord(null)}></div>
-              
-              {!showDeleteConfirm ? (
-                <>
-                  <div className="flex justify-between items-start mb-4">
-                    <div>
-                      <h3 className="text-2xl font-black text-slate-800 tracking-tighter">{selectedRecord.locationName}</h3>
-                      <p className="text-sm text-slate-400 font-bold mt-1">{selectedRecord.date} · {selectedRecord.county}</p>
+      <main className="flex-1 flex flex-row relative overflow-hidden">
+        <div className="hidden md:block w-80 lg:w-96 border-r z-20 shrink-0"><TimelineList /></div>
+        <div className="flex-1 relative">
+          <div id="map-view" className="w-full h-full" style={{ visibility: (activeTab === 'map' || window.innerWidth >= 768) ? 'visible' : 'hidden', position: 'absolute', inset: 0, zIndex: 1 }}></div>
+          {activeTab === 'timeline' && <div className="md:hidden absolute inset-0 bg-slate-50 z-20"><TimelineList /></div>}
+          {errorMsg && (
+            <div className="absolute top-4 left-4 right-4 z-[2000] bg-red-600 text-white p-3 rounded-xl shadow-xl flex items-center justify-between">
+              <div className="flex items-center gap-2 text-xs font-bold"><AlertCircle size={16} /> {errorMsg}</div>
+              <button onClick={() => setErrorMsg('')}><X size={16} /></button>
+            </div>
+          )}
+          {selectedRecord && (
+            <div className="fixed inset-0 bg-black/40 z-[1000] flex items-end md:items-center md:justify-center md:p-6">
+              <div className="w-full md:max-w-md bg-white rounded-t-[2.5rem] md:rounded-[2rem] p-6 animate-in slide-in-from-bottom duration-300 shadow-2xl overflow-y-auto max-h-[85vh]">
+                <div className="md:hidden w-12 h-1.5 bg-slate-200 rounded-full mx-auto mb-6" onClick={() => setSelectedRecord(null)}></div>
+                {!showDeleteConfirm ? (
+                  <>
+                    <div className="flex justify-between items-start mb-4">
+                      <div><h3 className="text-2xl font-black text-slate-800">{selectedRecord.locationName} <span className="text-sm text-blue-600">({getAgeAtDate(babyBirthday, selectedRecord.date)})</span></h3><p className="text-sm text-slate-400 font-bold uppercase">{selectedRecord.date} · {selectedRecord.county}{selectedRecord.district}</p></div>
+                      <button onClick={() => setSelectedRecord(null)} className="p-2 bg-slate-100 rounded-full text-slate-400"><X size={20} /></button>
                     </div>
-                    <button onClick={() => setSelectedRecord(null)} className="p-2 bg-slate-100 rounded-full text-slate-400"><X size={20} /></button>
+                    {selectedRecord.photo && <img src={selectedRecord.photo} className="w-full rounded-2xl mb-4 max-h-64 object-cover border" />}
+                    <div className="bg-slate-50 p-4 rounded-xl text-slate-600 text-sm italic mb-6">{selectedRecord.note || "一段美好的足跡。"}</div>
+                    <div className="flex gap-3">
+                      <button onClick={handleStartEdit} className="flex-1 py-4 text-blue-600 font-bold text-sm bg-blue-50 rounded-2xl active:scale-95 transition-transform flex items-center justify-center gap-2"><Edit3 size={16} /> 修改</button>
+                      <button onClick={() => setShowDeleteConfirm(true)} className="flex-1 py-4 text-red-500 font-bold text-sm bg-red-50 rounded-2xl active:scale-95 transition-transform flex items-center justify-center gap-2"><Trash2 size={16} /> 刪除</button>
+                    </div>
+                  </>
+                ) : (
+                  <div className="py-6 text-center">
+                    <Trash2 size={32} className="text-red-500 mx-auto mb-4" />
+                    <h3 className="text-xl font-black mb-2">確定刪除嗎？</h3>
+                    <div className="flex gap-3 mt-6"><button onClick={() => setShowDeleteConfirm(false)} className="flex-1 py-4 bg-slate-100 rounded-2xl">取消</button><button onClick={handleDelete} className="flex-1 py-4 bg-red-500 text-white rounded-2xl">確定</button></div>
                   </div>
-                  {selectedRecord.photo && <img src={selectedRecord.photo} className="w-full rounded-2xl mb-4 max-h-64 object-cover border" />}
-                  <div className="bg-slate-50 p-4 rounded-xl text-slate-600 text-sm italic mb-6">
-                    {selectedRecord.note || "留下了一段美好的足跡。"}
-                  </div>
-                  <button onClick={() => setShowDeleteConfirm(true)} className="w-full py-4 text-red-500 font-bold text-sm bg-red-50 rounded-2xl active:scale-95 transition-transform flex items-center justify-center gap-2">
-                    <Trash2 size={16} /> 刪除這段記憶
-                  </button>
-                </>
-              ) : (
-                <div className="py-6 text-center">
-                  <div className="w-16 h-16 bg-red-100 text-red-500 rounded-full flex items-center justify-center mx-auto mb-4">
-                    <Trash2 size={32} />
-                  </div>
-                  <h3 className="text-xl font-black text-slate-800 mb-2">確定要刪除嗎？</h3>
-                  <p className="text-sm text-slate-400 mb-8">刪除後將無法恢復這段回憶喔！</p>
-                  <div className="flex gap-3">
-                    <button onClick={() => setShowDeleteConfirm(false)} className="flex-1 py-4 bg-slate-100 text-slate-500 font-bold rounded-2xl">取消</button>
-                    <button onClick={handleDelete} disabled={isDeleting} className="flex-1 py-4 bg-red-500 text-white font-bold rounded-2xl shadow-lg shadow-red-100 flex items-center justify-center gap-2">
-                      {isDeleting ? <Loader2 size={18} className="animate-spin" /> : null}
-                      {isDeleting ? '正在刪除...' : '確定刪除'}
-                    </button>
-                  </div>
-                </div>
-              )}
-            </div>
-          </div>
-        )}
-
-        {isAdding && (
-          <div className="fixed inset-0 bg-white z-[1500] flex flex-col animate-in slide-in-from-bottom duration-300">
-            <div className="flex justify-between items-center p-4 border-b">
-              <button onClick={() => setIsAdding(false)} className="p-2 text-slate-400"><ChevronLeft /></button>
-              <h2 className="font-black text-slate-800">新增足跡</h2>
-              <div className="w-10"></div>
-            </div>
-            <form onSubmit={handleSave} className="flex-1 overflow-y-auto p-6 space-y-6">
-              <div className="grid grid-cols-2 gap-4">
-                <div className="space-y-1"><label className="text-[10px] font-black text-slate-400">日期</label>
-                  <input type="date" required value={formData.date} onChange={e => setFormData({...formData, date: e.target.value})} className="w-full bg-slate-50 border-none rounded-xl px-4 py-3 text-sm outline-none focus:ring-2 focus:ring-blue-500" /></div>
-                <div className="space-y-1"><label className="text-[10px] font-black text-slate-400">縣市</label>
-                  <select value={formData.county} onChange={e => setFormData({...formData, county: e.target.value})} className="w-full bg-slate-50 border-none rounded-xl px-4 py-3 text-sm outline-none appearance-none">
-                    {Object.keys(TAIWAN_DATA).map(c => <option key={c} value={c}>{c}</option>)}
-                  </select></div>
+                )}
               </div>
-              <div className="space-y-1"><label className="text-[10px] font-black text-slate-400">地點名稱 (必填)</label>
-                <input type="text" required placeholder="例如：飛牛牧場" value={formData.locationName} onChange={e => setFormData({...formData, locationName: e.target.value})} className="w-full bg-slate-50 border-none rounded-xl px-4 py-3 text-sm outline-none focus:ring-2 focus:ring-blue-500" /></div>
-              <div className="space-y-1"><label className="text-[10px] font-black text-slate-400">照片回憶</label>
-                <div className="relative h-40 bg-slate-50 rounded-2xl border-2 border-dashed border-slate-200 flex flex-col items-center justify-center overflow-hidden">
-                  {formData.photo ? <img src={formData.photo} className="w-full h-full object-cover" /> : <><Camera className="text-blue-500 mb-1" size={24} /><span className="text-xs font-bold text-slate-400">選擇照片</span></>}
-                  <input type="file" accept="image/*" className="absolute inset-0 opacity-0 cursor-pointer" onChange={(e) => {
-                    const file = e.target.files[0];
-                    if (file) { const reader = new FileReader(); reader.onloadend = () => setFormData(prev => ({ ...prev, photo: reader.result })); reader.readAsDataURL(file); }
-                  }} /></div></div>
-              <div className="space-y-1"><label className="text-[10px] font-black text-slate-400">成長筆記</label>
-                <textarea rows="3" value={formData.note} onChange={e => setFormData({...formData, note: e.target.value})} className="w-full bg-slate-50 border-none rounded-xl px-4 py-3 text-sm outline-none resize-none" placeholder="寫點什麼..." /></div>
-              <button type="submit" disabled={isSaving} className={`w-full py-4 text-white rounded-2xl font-black shadow-xl transition-all flex items-center justify-center gap-2 ${isSaving ? 'bg-slate-300' : 'bg-blue-600 active:scale-95 shadow-blue-100'}`}>
-                {isSaving ? <Loader2 size={20} className="animate-spin" /> : <Cloud size={20} />}
-                {isSaving ? '同步雲端中...' : '存入回憶'}
-              </button>
+            </div>
+          )}
+        </div>
+        {isAdding && (
+          <div className="fixed inset-0 bg-white z-[1500] flex flex-col animate-in slide-in-from-bottom duration-300 md:items-center md:justify-center md:bg-black/50">
+            <div className="flex justify-between items-center p-4 border-b bg-white md:rounded-t-3xl md:w-full md:max-w-md">
+              <button onClick={() => { setIsAdding(false); setIsEditing(false); }}><X /></button>
+              <h2 className="font-black">{isEditing ? '修改紀錄' : '紀錄新足跡'}</h2><div className="w-10"></div>
+            </div>
+            <form onSubmit={handleSave} className="flex-1 overflow-y-auto p-6 space-y-5 bg-white md:w-full md:max-w-md md:flex-none">
+              <div className="grid grid-cols-2 gap-4">
+                <div className="space-y-1"><label className="text-[10px] font-black text-slate-400 uppercase">日期</label><input type="date" required value={formData.date} onChange={e => setFormData({...formData, date: e.target.value})} className="w-full bg-slate-50 rounded-xl px-4 py-3 text-sm focus:ring-2 focus:ring-blue-500 outline-none" /></div>
+                <div className="space-y-1"><label className="text-[10px] font-black text-slate-400 uppercase">縣市</label><select value={formData.county} onChange={e => handleCountyChange(e.target.value)} className="w-full bg-slate-50 rounded-xl px-4 py-3 text-sm focus:ring-2 focus:ring-blue-500 outline-none">{Object.keys(TAIWAN_DATA).map(c => <option key={c} value={c}>{c}</option>)}</select></div>
+              </div>
+              <div className="space-y-1"><label className="text-[10px] font-black text-slate-400 uppercase">鄉鎮市區</label><select value={formData.district} onChange={e => setFormData({...formData, district: e.target.value})} className="w-full bg-slate-50 rounded-xl px-4 py-3 text-sm outline-none">{TAIWAN_DATA[formData.county].districts.map(d => <option key={d} value={d}>{d}</option>)}</select></div>
+              <div className="space-y-1"><label className="text-[10px] font-black text-slate-400 uppercase">地點名稱 (必填)</label><input type="text" required placeholder="例如：飛牛牧場" value={formData.locationName} onChange={e => setFormData({...formData, locationName: e.target.value})} className="w-full bg-slate-50 rounded-xl px-4 py-3 text-sm outline-none" /></div>
+              <div className="space-y-1"><label className="text-[10px] font-black text-slate-400 uppercase">照片回憶</label><div className="relative h-40 bg-slate-50 rounded-2xl border-2 border-dashed border-slate-200 flex flex-col items-center justify-center overflow-hidden">{formData.photo ? <img src={formData.photo} className="w-full h-full object-cover" /> : <><Camera size={24} className="text-slate-300"/><span className="text-xs text-slate-400">上傳照片</span></>}<input type="file" accept="image/*" className="absolute inset-0 opacity-0" onChange={(e) => { const file = e.target.files[0]; if(file) { const reader = new FileReader(); reader.onloadend = () => setFormData(prev => ({ ...prev, photo: reader.result })); reader.readAsDataURL(file); } }} /></div></div>
+              <div className="space-y-1"><label className="text-[10px] font-black text-slate-400 uppercase">筆記</label><textarea rows="3" value={formData.note} onChange={e => setFormData({...formData, note: e.target.value})} className="w-full bg-slate-50 rounded-xl px-4 py-3 text-sm outline-none" placeholder="想寫點什麼..." /></div>
+              <button type="submit" disabled={isSaving} className="w-full py-4 bg-blue-600 text-white rounded-2xl font-black shadow-lg disabled:bg-slate-300 flex items-center justify-center gap-2">{isSaving ? <Loader2 className="animate-spin" /> : <Cloud size={20} />} {isSaving ? '正在同步...' : (isEditing ? '更新紀錄' : '存入回憶')}</button>
             </form>
           </div>
         )}
       </main>
-
-      <footer className="bg-white border-t px-6 py-2 pb-8 flex justify-between items-center z-50 shrink-0 shadow-lg">
-        <button onClick={() => setActiveTab('map')} className={`flex flex-col items-center gap-1 ${activeTab === 'map' ? 'text-blue-600' : 'text-slate-300'}`}><MapIcon size={24} /><span className="text-[10px] font-black uppercase">地圖</span></button>
-        <button onClick={() => setIsAdding(true)} className="w-14 h-14 bg-blue-600 text-white rounded-full shadow-lg flex items-center justify-center -top-6 relative active:scale-90 transition-transform border-4 border-white"><Plus size={32} /></button>
-        <button onClick={() => { setActiveTab('timeline'); setSelectedRecord(null); }} className={`flex flex-col items-center gap-1 ${activeTab === 'timeline' ? 'text-blue-600' : 'text-slate-300'}`}><List size={24} /><span className="text-[10px] font-black uppercase">列表</span></button>
+      <footer className="md:hidden bg-white border-t px-6 py-2 pb-8 flex justify-between items-center z-50 shrink-0 shadow-lg">
+        <button onClick={() => setActiveTab('map')} className={`flex flex-col items-center gap-1 ${activeTab === 'map' ? 'text-blue-600' : 'text-slate-300'}`}><MapIcon size={24} /><span className="text-[10px] font-black">地圖</span></button>
+        <button onClick={() => { setIsAdding(true); setIsEditing(false); }} className="w-14 h-14 bg-blue-600 text-white rounded-full shadow-lg flex items-center justify-center -top-6 relative active:scale-90 border-4 border-white"><Plus size={32} /></button>
+        <button onClick={() => { setActiveTab('timeline'); setSelectedRecord(null); }} className={`flex flex-col items-center gap-1 ${activeTab === 'timeline' ? 'text-blue-600' : 'text-slate-300'}`}><List size={24} /><span className="text-[10px] font-black">時光軸</span></button>
       </footer>
-      <style>{`.custom-icon { background: none; border: none; } .leaflet-container { font-family: inherit; } input, select, textarea { font-size: 16px !important; }`}</style>
+      <style>{`.custom-icon { background: none; border: none; } .leaflet-container { font-family: inherit; }`}</style>
     </div>
   );
 };
